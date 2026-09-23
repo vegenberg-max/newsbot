@@ -1,8 +1,9 @@
 import os
-import html
 import uuid
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import (
     Update,
@@ -23,14 +24,19 @@ from telegram.ext import (
 # НАЛАШТУВАННЯ
 # ============================================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "10000"))
 
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
+KYIV = ZoneInfo("Europe/Kyiv")
 
-# Тестовий канал
+# ============================================================
+# КАНАЛИ
+# ============================================================
+
 CHANNELS = {
     "-1004294187385": {
         "name": "🇷🇴 Тестовий канал",
+
         "signature": (
             '<b>➡️ Більше цікавої інформації у нашому чаті</b>\n'
             'https://t.me/ua_in_ro\n'
@@ -44,17 +50,40 @@ CHANNELS = {
     }
 }
 
-# Тут тимчасово зберігаються пости.
-# Пізніше зробимо SQLite/PostgreSQL, щоб вони не зникали
-# після перезапуску Render.
+# ============================================================
+# ТИМЧАСОВЕ ЗБЕРІГАННЯ ПОСТІВ
+# ============================================================
+
 posts = {}
+
+
+# ============================================================
+# HTTP SERVER ДЛЯ RENDER WEB SERVICE
+# ============================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is running")
+
+    def log_message(self, format, *args):
+        return
+
+
+def run_web_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
 
 
 # ============================================================
 # КНОПКИ
 # ============================================================
 
-def main_buttons(post_id: str):
+def action_buttons(post_id):
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
@@ -77,7 +106,8 @@ def main_buttons(post_id: str):
     ])
 
 
-def time_buttons(post_id: str):
+def time_buttons(post_id):
+
     times = [
         "08:25",
         "10:25",
@@ -95,33 +125,33 @@ def time_buttons(post_id: str):
         "22:00",
     ]
 
-    buttons = []
-
+    rows = []
     row = []
 
-    for time in times:
+    for t in times:
+
         row.append(
             InlineKeyboardButton(
-                time,
-                callback_data=f"time|{post_id}|{time}"
+                t,
+                callback_data=f"time|{post_id}|{t}"
             )
         )
 
         if len(row) == 3:
-            buttons.append(row)
+            rows.append(row)
             row = []
 
     if row:
-        buttons.append(row)
+        rows.append(row)
 
-    buttons.append([
+    rows.append([
         InlineKeyboardButton(
             "⬅️ Назад",
             callback_data=f"back:{post_id}"
         )
     ])
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(rows)
 
 
 # ============================================================
@@ -129,84 +159,99 @@ def time_buttons(post_id: str):
 # ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "👋 <b>Привіт!</b>\n\n"
-        "Перешли мені готовий пост — текст, фото або фото з текстом.\n\n"
-        "Я покажу тобі, як він виглядатиме після додавання підпису."
-    )
 
     await update.message.reply_text(
-        text,
+        "👋 <b>Привіт!</b>\n\n"
+        "Перешли мені готовий пост.\n\n"
+        "Я покажу його попередній перегляд, "
+        "додам підпис і дам вибрати час публікації.",
         parse_mode=ParseMode.HTML
     )
 
 
 # ============================================================
-# ОТРИМАННЯ ПОСТА
+# ОТРИМАННЯ ПОВІДОМЛЕННЯ
 # ============================================================
 
 async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     message = update.message
 
     if not message:
         return
 
-    # --------------------------------------------------------
-    # Визначаємо тип повідомлення
-    # --------------------------------------------------------
-
-    post_id = str(uuid.uuid4())[:8]
+    post_id = uuid.uuid4().hex[:10]
 
     photo_file_id = None
     video_file_id = None
+    text = ""
+    entities = []
 
-    text = None
-    entities = None
+    # -------------------------------
+    # ФОТО
+    # -------------------------------
 
-    # Фото
     if message.photo:
+
         photo_file_id = message.photo[-1].file_id
+
         text = message.caption or ""
+
         entities = message.caption_entities or []
 
-    # Відео
+    # -------------------------------
+    # ВІДЕО
+    # -------------------------------
+
     elif message.video:
+
         video_file_id = message.video.file_id
+
         text = message.caption or ""
+
         entities = message.caption_entities or []
 
-    # Текст
+    # -------------------------------
+    # ТЕКСТ
+    # -------------------------------
+
     elif message.text:
+
         text = message.text
+
         entities = message.entities or []
 
     else:
+
         await message.reply_text(
             "⚠️ Цей тип повідомлення поки не підтримується."
         )
-        return
 
-    # --------------------------------------------------------
-    # Зберігаємо пост
-    # --------------------------------------------------------
+        return
 
     posts[post_id] = {
         "user_id": update.effective_user.id,
-        "text": text or "",
-        "entities": entities or [],
+
+        "text": text,
+
+        "entities": entities,
+
         "photo_file_id": photo_file_id,
+
         "video_file_id": video_file_id,
+
         "channel_id": None,
-        "scheduled_job": None,
+
     }
 
-    # --------------------------------------------------------
-    # Вибір каналу
-    # --------------------------------------------------------
+    # ========================================================
+    # ВИБІР КАНАЛУ
+    # ========================================================
 
     buttons = []
 
     for channel_id, channel in CHANNELS.items():
+
         buttons.append([
             InlineKeyboardButton(
                 channel["name"],
@@ -229,44 +274,20 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# ВИБІР КАНАЛУ
+# ФОРМУВАННЯ ТЕКСТУ
 # ============================================================
 
-async def select_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+def build_text(post):
 
-    data = query.data.split(":", 2)
+    original = post["text"]
 
-    if len(data) != 3:
-        return
-
-    _, post_id, channel_id = data
-
-    if post_id not in posts:
-        await query.edit_message_text(
-            "⚠️ Цей пост більше недоступний."
-        )
-        return
-
-    posts[post_id]["channel_id"] = channel_id
-
-    await show_preview(query, post_id)
-
-
-# ============================================================
-# ФОРМУЄМО ПІДПИС
-# ============================================================
-
-def get_final_text(post):
     channel_id = post["channel_id"]
 
     signature = CHANNELS[channel_id]["signature"]
 
-    original_text = post["text"] or ""
+    if original:
 
-    if original_text:
-        return f"{original_text}\n\n{signature}"
+        return original + "\n\n" + signature
 
     return signature
 
@@ -275,55 +296,104 @@ def get_final_text(post):
 # PREVIEW
 # ============================================================
 
-async def show_preview(query, post_id):
+async def send_preview(chat_id, post_id, context):
+
     post = posts[post_id]
 
-    final_text = get_final_text(post)
+    final_text = build_text(post)
 
-    # Видаляємо старе повідомлення з кнопками,
-    # щоб preview виглядав як справжній пост.
+    # ========================================================
+    # ФОТО
+    # ========================================================
+
+    if post["photo_file_id"]:
+
+        await context.bot.send_photo(
+            chat_id=chat_id,
+
+            photo=post["photo_file_id"],
+
+            caption=final_text,
+
+            parse_mode=ParseMode.HTML,
+
+            reply_markup=action_buttons(post_id)
+        )
+
+        return
+
+    # ========================================================
+    # ВІДЕО
+    # ========================================================
+
+    if post["video_file_id"]:
+
+        await context.bot.send_video(
+            chat_id=chat_id,
+
+            video=post["video_file_id"],
+
+            caption=final_text,
+
+            parse_mode=ParseMode.HTML,
+
+            reply_markup=action_buttons(post_id)
+        )
+
+        return
+
+    # ========================================================
+    # ТЕКСТ
+    # ========================================================
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+
+        text=final_text,
+
+        parse_mode=ParseMode.HTML,
+
+        disable_web_page_preview=False,
+
+        reply_markup=action_buttons(post_id)
+    )
+
+
+# ============================================================
+# ВИБІР КАНАЛУ
+# ============================================================
+
+async def select_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    _, post_id, channel_id = query.data.split(":", 2)
+
+    if post_id not in posts:
+
+        await query.edit_message_text(
+            "⚠️ Пост більше недоступний."
+        )
+
+        return
+
+    posts[post_id]["channel_id"] = channel_id
+
+    # Видаляємо повідомлення
+    # "Куди публікуємо?"
+
     try:
         await query.message.delete()
     except Exception:
         pass
 
-    # --------------------------------------------------------
-    # Фото
-    # --------------------------------------------------------
-
-    if post["photo_file_id"]:
-        await query.message.chat.send_photo(
-            photo=post["photo_file_id"],
-            caption=final_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_buttons(post_id)
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Відео
-    # --------------------------------------------------------
-
-    if post["video_file_id"]:
-        await query.message.chat.send_video(
-            video=post["video_file_id"],
-            caption=final_text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_buttons(post_id)
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Звичайний текст
-    # --------------------------------------------------------
-
-    await query.message.chat.send_message(
-        text=final_text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_buttons(post_id),
-        disable_web_page_preview=False
+    # Надсилаємо справжній preview
+    await send_preview(
+        query.from_user.id,
+        post_id,
+        context
     )
 
 
@@ -332,6 +402,7 @@ async def show_preview(query, post_id):
 # ============================================================
 
 async def publish_post(post_id, context):
+
     if post_id not in posts:
         return
 
@@ -339,35 +410,53 @@ async def publish_post(post_id, context):
 
     channel_id = post["channel_id"]
 
-    if not channel_id:
-        return
+    final_text = build_text(post)
 
-    final_text = get_final_text(post)
+    # ========================================================
+    # ФОТО
+    # ========================================================
 
-    # Фото
     if post["photo_file_id"]:
+
         await context.bot.send_photo(
             chat_id=channel_id,
+
             photo=post["photo_file_id"],
+
             caption=final_text,
+
             parse_mode=ParseMode.HTML
         )
 
-    # Відео
+    # ========================================================
+    # ВІДЕО
+    # ========================================================
+
     elif post["video_file_id"]:
+
         await context.bot.send_video(
             chat_id=channel_id,
+
             video=post["video_file_id"],
+
             caption=final_text,
+
             parse_mode=ParseMode.HTML
         )
 
-    # Текст
+    # ========================================================
+    # ТЕКСТ
+    # ========================================================
+
     else:
+
         await context.bot.send_message(
             chat_id=channel_id,
+
             text=final_text,
+
             parse_mode=ParseMode.HTML,
+
             disable_web_page_preview=False
         )
 
@@ -377,27 +466,27 @@ async def publish_post(post_id, context):
 # ============================================================
 
 async def publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
+
     await query.answer()
 
     _, post_id = query.data.split(":", 1)
 
     if post_id not in posts:
+
         await query.edit_message_text(
             "⚠️ Пост більше недоступний."
         )
+
         return
 
     try:
-        await publish_post(post_id, context)
 
-        # Видаляємо кнопки після публікації
-        try:
-            await query.message.edit_reply_markup(
-                reply_markup=None
-            )
-        except Exception:
-            pass
+        await publish_post(
+            post_id,
+            context
+        )
 
         await query.message.reply_text(
             "✅ <b>Опубліковано!</b>",
@@ -407,26 +496,25 @@ async def publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del posts[post_id]
 
     except Exception as e:
+
         await query.message.reply_text(
-            f"❌ Не вдалося опублікувати:\n<code>{html.escape(str(e))}</code>",
-            parse_mode=ParseMode.HTML
+            f"❌ Помилка публікації:\n{e}"
         )
 
 
 # ============================================================
-# ВИБІР ВІДКЛАДЕНОГО ЧАСУ
+# ВІДКЛАСТИ
 # ============================================================
 
 async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
+
     await query.answer()
 
     _, post_id = query.data.split(":", 1)
 
     if post_id not in posts:
-        await query.edit_message_text(
-            "⚠️ Пост більше недоступний."
-        )
         return
 
     await query.edit_message_reply_markup(
@@ -435,53 +523,46 @@ async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# НАЗАД ДО PREVIEW
+# НАЗАД
 # ============================================================
 
 async def back_to_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
+
     await query.answer()
 
     _, post_id = query.data.split(":", 1)
 
     if post_id not in posts:
-        await query.edit_message_text(
-            "⚠️ Пост більше недоступний."
-        )
         return
 
     await query.edit_message_reply_markup(
-        reply_markup=main_buttons(post_id)
+        reply_markup=action_buttons(post_id)
     )
 
 
 # ============================================================
-# ПЛАНУВАННЯ
+# ВИБІР ЧАСУ
 # ============================================================
 
 async def choose_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
+
     await query.answer()
 
-    # callback:
-    # time|POST_ID|08:25
-
-    parts = query.data.split("|", 2)
-
-    if len(parts) != 3:
-        return
-
-    _, post_id, time_str = parts
+    _, post_id, time_string = query.data.split("|", 2)
 
     if post_id not in posts:
-        await query.edit_message_text(
-            "⚠️ Пост більше недоступний."
-        )
         return
 
-    hour, minute = map(int, time_str.split(":"))
+    hour, minute = map(
+        int,
+        time_string.split(":")
+    )
 
-    now = datetime.now(KYIV_TZ)
+    now = datetime.now(KYIV)
 
     target = now.replace(
         hour=hour,
@@ -490,68 +571,88 @@ async def choose_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         microsecond=0
     )
 
-    # Якщо час сьогодні вже минув —
-    # плануємо на завтра.
+    # Якщо цей час вже пройшов —
+    # переносимо на завтра.
+
     if target <= now:
-        from datetime import timedelta
+
         target += timedelta(days=1)
 
-    delay = (target - now).total_seconds()
-
-    # --------------------------------------------------------
-    # Створюємо job з name = post_id
-    # Це потрібно для нормального скасування.
-    # --------------------------------------------------------
+    delay = (
+        target - now
+    ).total_seconds()
 
     job = context.application.job_queue.run_once(
         scheduled_publish,
+
         when=delay,
+
         data=post_id,
+
         name=post_id
     )
 
-    posts[post_id]["scheduled_job"] = job
+    posts[post_id]["job"] = job
 
-    await query.edit_message_reply_markup(reply_markup=None)
+    await query.edit_message_reply_markup(
+        reply_markup=None
+    )
 
     await query.message.reply_text(
-        f"⏰ <b>Заплановано на {target.strftime('%d.%m.%Y о %H:%M')}</b>\n\n"
+        "⏰ <b>Заплановано!</b>\n\n"
+        f"📅 {target.strftime('%d.%m.%Y')}\n"
+        f"🕐 {target.strftime('%H:%M')}\n\n"
         "Час за Києвом.",
         parse_mode=ParseMode.HTML
     )
 
 
 # ============================================================
-# ЗАПУСК ЗАПЛАНОВАНОГО ПОСТА
+# ЗАПЛАНОВАНА ПУБЛІКАЦІЯ
 # ============================================================
 
 async def scheduled_publish(context: ContextTypes.DEFAULT_TYPE):
+
     post_id = context.job.data
 
     if post_id not in posts:
         return
 
     try:
-        await publish_post(post_id, context)
+
+        await publish_post(
+            post_id,
+            context
+        )
 
         del posts[post_id]
 
     except Exception as e:
-        print(f"Scheduled post error: {e}")
+
+        print(
+            f"Scheduled publish error: {e}"
+        )
 
 
 # ============================================================
-# СКАСУВАННЯ
+# СКАСУВАТИ
 # ============================================================
 
 async def cancel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
+
     await query.answer()
 
     _, post_id = query.data.split(":", 1)
 
-    # Якщо існує scheduled job — видаляємо його
-    jobs = context.application.job_queue.get_jobs_by_name(post_id)
+    # Видаляємо запланований job
+
+    jobs = (
+        context.application
+        .job_queue
+        .get_jobs_by_name(post_id)
+    )
 
     for job in jobs:
         job.schedule_removal()
@@ -560,8 +661,11 @@ async def cancel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del posts[post_id]
 
     try:
+
         await query.message.delete()
+
     except Exception:
+
         await query.edit_message_text(
             "❌ Скасовано."
         )
@@ -572,10 +676,21 @@ async def cancel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 def main():
+
     if not BOT_TOKEN:
+
         raise RuntimeError(
-            "BOT_TOKEN не знайдено в Environment Variables."
+            "BOT_TOKEN не знайдено."
         )
+
+    # Web server для Render
+
+    threading.Thread(
+        target=run_web_server,
+        daemon=True
+    ).start()
+
+    # Telegram bot
 
     application = (
         Application.builder()
@@ -583,12 +698,13 @@ def main():
         .build()
     )
 
-    # /start
     application.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
-    # Отримання тексту / фото / відео
     application.add_handler(
         MessageHandler(
             filters.TEXT |
@@ -598,7 +714,6 @@ def main():
         )
     )
 
-    # Кнопки
     application.add_handler(
         CallbackQueryHandler(
             select_channel,
