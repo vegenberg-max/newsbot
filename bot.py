@@ -9,8 +9,9 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MessageEntity,
 )
-from telegram.constants import ParseMode
+from telegram.constants import MessageEntityType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,6 +30,7 @@ PORT = int(os.getenv("PORT", "10000"))
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
+
 # ============================================================
 # КАНАЛИ
 # ============================================================
@@ -37,28 +39,71 @@ CHANNELS = {
     "-1004294187385": {
         "name": "🇷🇴 Тестовий канал",
 
-        "signature": (
-            '<b>➡️ Більше цікавої інформації у нашому чаті</b>\n'
-            'https://t.me/ua_in_ro\n'
-            '<b><u><a href="https://t.me/ua_in_ro">'
-            '🇺🇦 Украинцы в Румынии🇹🇩'
-            '</a></u></b>\n'
-            '<b><a href="https://t.me/addlist/87244EkzpXxiZjFi">'
-            '❤️ Список полезных каналов'
-            '</a></b>'
+        # Тут:
+        # 1) перший рядок жирний
+        # 2) URL
+        # 3) ОДНА порожня строка
+        # 4) Украинцы — жирний + підкреслений + посилання
+        # 5) Список — жирний + посилання
+        "signature_text": (
+            "➡️ Більше цікавої інформації у нашому чаті\n"
+            "https://t.me/ua_in_ro\n\n"
+            "🇺🇦 Украинцы в Румынии🇹🇩\n"
+            "❤️ Список полезных каналов"
         ),
+
+        "signature_entities": [
+            # Перший рядок — жирний
+            {
+                "type": MessageEntityType.BOLD,
+                "offset": 0,
+                "length": 41,
+            },
+
+            # Украинцы — жирний + підкреслений + URL
+            {
+                "type": MessageEntityType.BOLD,
+                "offset": 73,
+                "length": 30,
+            },
+            {
+                "type": MessageEntityType.UNDERLINE,
+                "offset": 73,
+                "length": 30,
+            },
+            {
+                "type": MessageEntityType.TEXT_LINK,
+                "offset": 73,
+                "length": 30,
+                "url": "https://t.me/ua_in_ro",
+            },
+
+            # Список — жирний + URL
+            {
+                "type": MessageEntityType.BOLD,
+                "offset": 104,
+                "length": 27,
+            },
+            {
+                "type": MessageEntityType.TEXT_LINK,
+                "offset": 104,
+                "length": 27,
+                "url": "https://t.me/addlist/87244EkzpXxiZjFi",
+            },
+        ],
     }
 }
 
+
 # ============================================================
-# ТИМЧАСОВЕ ЗБЕРІГАННЯ ПОСТІВ
+# ПОСТИ
 # ============================================================
 
 posts = {}
 
 
 # ============================================================
-# HTTP SERVER ДЛЯ RENDER WEB SERVICE
+# HTTP SERVER ДЛЯ RENDER
 # ============================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -70,12 +115,131 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is running")
 
     def log_message(self, format, *args):
-        return
+        pass
 
 
 def run_web_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     server.serve_forever()
+
+
+# ============================================================
+# ENTITY HELPERS
+# ============================================================
+
+def copy_entities(entities):
+    """
+    Перетворює Telegram MessageEntity у словники,
+    щоб їх можна було безпечно зберігати в пам'яті.
+    """
+
+    result = []
+
+    for entity in entities or []:
+
+        item = {
+            "type": entity.type,
+            "offset": entity.offset,
+            "length": entity.length,
+        }
+
+        if entity.url:
+            item["url"] = entity.url
+
+        if entity.user:
+            item["user"] = entity.user
+
+        if entity.language:
+            item["language"] = entity.language
+
+        if entity.custom_emoji_id:
+            item["custom_emoji_id"] = entity.custom_emoji_id
+
+        result.append(item)
+
+    return result
+
+
+def make_entity(item, offset_shift=0):
+    """
+    Створює MessageEntity для Telegram.
+    """
+
+    kwargs = {
+        "type": item["type"],
+        "offset": item["offset"] + offset_shift,
+        "length": item["length"],
+    }
+
+    if item.get("url"):
+        kwargs["url"] = item["url"]
+
+    if item.get("user"):
+        kwargs["user"] = item["user"]
+
+    if item.get("language"):
+        kwargs["language"] = item["language"]
+
+    if item.get("custom_emoji_id"):
+        kwargs["custom_emoji_id"] = item["custom_emoji_id"]
+
+    return MessageEntity(**kwargs)
+
+
+def utf16_length(text):
+    """
+    Telegram offsets працюють у UTF-16.
+    """
+
+    return len(text.encode("utf-16-le")) // 2
+
+
+def build_final_content(post):
+    """
+    Об'єднує оригінальний текст/форматування
+    з автоматичним підписом.
+    """
+
+    original_text = post["text"] or ""
+    original_entities = post["entities"] or []
+
+    channel = CHANNELS[post["channel_id"]]
+
+    signature_text = channel["signature_text"]
+
+    if original_text:
+        final_text = (
+            original_text
+            + "\n\n"
+            + signature_text
+        )
+
+        signature_offset = utf16_length(
+            original_text + "\n\n"
+        )
+
+    else:
+        final_text = signature_text
+        signature_offset = 0
+
+    final_entities = []
+
+    # Оригінальне форматування
+    for entity in original_entities:
+        final_entities.append(
+            make_entity(entity)
+        )
+
+    # Форматування підпису
+    for entity in channel["signature_entities"]:
+        final_entities.append(
+            make_entity(
+                entity,
+                signature_offset
+            )
+        )
+
+    return final_text, final_entities
 
 
 # ============================================================
@@ -128,12 +292,12 @@ def time_buttons(post_id):
     rows = []
     row = []
 
-    for t in times:
+    for time in times:
 
         row.append(
             InlineKeyboardButton(
-                t,
-                callback_data=f"time|{post_id}|{t}"
+                time,
+                callback_data=f"time|{post_id}|{time}"
             )
         )
 
@@ -163,14 +327,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 <b>Привіт!</b>\n\n"
         "Перешли мені готовий пост.\n\n"
-        "Я покажу його попередній перегляд, "
-        "додам підпис і дам вибрати час публікації.",
-        parse_mode=ParseMode.HTML
+        "Я покажу його готовий вигляд "
+        "перед публікацією.",
+        parse_mode="HTML"
     )
 
 
 # ============================================================
-# ОТРИМАННЯ ПОВІДОМЛЕННЯ
+# ОТРИМАННЯ ПОСТА
 # ============================================================
 
 async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -182,14 +346,15 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     post_id = uuid.uuid4().hex[:10]
 
-    photo_file_id = None
-    video_file_id = None
     text = ""
     entities = []
 
-    # -------------------------------
+    photo_file_id = None
+    video_file_id = None
+
+    # --------------------------------------------------------
     # ФОТО
-    # -------------------------------
+    # --------------------------------------------------------
 
     if message.photo:
 
@@ -197,11 +362,13 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = message.caption or ""
 
-        entities = message.caption_entities or []
+        entities = copy_entities(
+            message.caption_entities
+        )
 
-    # -------------------------------
+    # --------------------------------------------------------
     # ВІДЕО
-    # -------------------------------
+    # --------------------------------------------------------
 
     elif message.video:
 
@@ -209,17 +376,21 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         text = message.caption or ""
 
-        entities = message.caption_entities or []
+        entities = copy_entities(
+            message.caption_entities
+        )
 
-    # -------------------------------
+    # --------------------------------------------------------
     # ТЕКСТ
-    # -------------------------------
+    # --------------------------------------------------------
 
     elif message.text:
 
         text = message.text
 
-        entities = message.entities or []
+        entities = copy_entities(
+            message.entities
+        )
 
     else:
 
@@ -231,22 +402,16 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     posts[post_id] = {
         "user_id": update.effective_user.id,
-
         "text": text,
-
         "entities": entities,
-
         "photo_file_id": photo_file_id,
-
         "video_file_id": video_file_id,
-
         "channel_id": None,
-
     }
 
-    # ========================================================
+    # --------------------------------------------------------
     # ВИБІР КАНАЛУ
-    # ========================================================
+    # --------------------------------------------------------
 
     buttons = []
 
@@ -268,93 +433,68 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await message.reply_text(
         "📢 <b>Куди публікуємо?</b>",
-        parse_mode=ParseMode.HTML,
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
-
-
-# ============================================================
-# ФОРМУВАННЯ ТЕКСТУ
-# ============================================================
-
-def build_text(post):
-
-    original = post["text"]
-
-    channel_id = post["channel_id"]
-
-    signature = CHANNELS[channel_id]["signature"]
-
-    if original:
-
-        return original + "\n\n" + signature
-
-    return signature
 
 
 # ============================================================
 # PREVIEW
 # ============================================================
 
-async def send_preview(chat_id, post_id, context):
+async def send_preview(
+    chat_id,
+    post_id,
+    context
+):
 
     post = posts[post_id]
 
-    final_text = build_text(post)
+    final_text, final_entities = (
+        build_final_content(post)
+    )
 
-    # ========================================================
+    # --------------------------------------------------------
     # ФОТО
-    # ========================================================
+    # --------------------------------------------------------
 
     if post["photo_file_id"]:
 
         await context.bot.send_photo(
             chat_id=chat_id,
-
             photo=post["photo_file_id"],
-
             caption=final_text,
-
-            parse_mode=ParseMode.HTML,
-
+            caption_entities=final_entities,
             reply_markup=action_buttons(post_id)
         )
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # ВІДЕО
-    # ========================================================
+    # --------------------------------------------------------
 
     if post["video_file_id"]:
 
         await context.bot.send_video(
             chat_id=chat_id,
-
             video=post["video_file_id"],
-
             caption=final_text,
-
-            parse_mode=ParseMode.HTML,
-
+            caption_entities=final_entities,
             reply_markup=action_buttons(post_id)
         )
 
         return
 
-    # ========================================================
+    # --------------------------------------------------------
     # ТЕКСТ
-    # ========================================================
+    # --------------------------------------------------------
 
     await context.bot.send_message(
         chat_id=chat_id,
-
         text=final_text,
-
-        parse_mode=ParseMode.HTML,
-
+        entities=final_entities,
         disable_web_page_preview=False,
-
         reply_markup=action_buttons(post_id)
     )
 
@@ -363,13 +503,18 @@ async def send_preview(chat_id, post_id, context):
 # ВИБІР КАНАЛУ
 # ============================================================
 
-async def select_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def select_channel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
     await query.answer()
 
-    _, post_id, channel_id = query.data.split(":", 2)
+    _, post_id, channel_id = (
+        query.data.split(":", 2)
+    )
 
     if post_id not in posts:
 
@@ -381,15 +526,11 @@ async def select_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     posts[post_id]["channel_id"] = channel_id
 
-    # Видаляємо повідомлення
-    # "Куди публікуємо?"
-
     try:
         await query.message.delete()
     except Exception:
         pass
 
-    # Надсилаємо справжній preview
     await send_preview(
         query.from_user.id,
         post_id,
@@ -401,7 +542,10 @@ async def select_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ПУБЛІКАЦІЯ
 # ============================================================
 
-async def publish_post(post_id, context):
+async def publish_post(
+    post_id,
+    context
+):
 
     if post_id not in posts:
         return
@@ -410,53 +554,46 @@ async def publish_post(post_id, context):
 
     channel_id = post["channel_id"]
 
-    final_text = build_text(post)
+    final_text, final_entities = (
+        build_final_content(post)
+    )
 
-    # ========================================================
+    # --------------------------------------------------------
     # ФОТО
-    # ========================================================
+    # --------------------------------------------------------
 
     if post["photo_file_id"]:
 
         await context.bot.send_photo(
             chat_id=channel_id,
-
             photo=post["photo_file_id"],
-
             caption=final_text,
-
-            parse_mode=ParseMode.HTML
+            caption_entities=final_entities
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # ВІДЕО
-    # ========================================================
+    # --------------------------------------------------------
 
     elif post["video_file_id"]:
 
         await context.bot.send_video(
             chat_id=channel_id,
-
             video=post["video_file_id"],
-
             caption=final_text,
-
-            parse_mode=ParseMode.HTML
+            caption_entities=final_entities
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # ТЕКСТ
-    # ========================================================
+    # --------------------------------------------------------
 
     else:
 
         await context.bot.send_message(
             chat_id=channel_id,
-
             text=final_text,
-
-            parse_mode=ParseMode.HTML,
-
+            entities=final_entities,
             disable_web_page_preview=False
         )
 
@@ -465,13 +602,18 @@ async def publish_post(post_id, context):
 # ОПУБЛІКУВАТИ ЗАРАЗ
 # ============================================================
 
-async def publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def publish_now(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
     await query.answer()
 
-    _, post_id = query.data.split(":", 1)
+    _, post_id = (
+        query.data.split(":", 1)
+    )
 
     if post_id not in posts:
 
@@ -489,16 +631,19 @@ async def publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         await query.message.reply_text(
-            "✅ <b>Опубліковано!</b>",
-            parse_mode=ParseMode.HTML
+            "✅ Опубліковано!"
         )
 
         del posts[post_id]
 
     except Exception as e:
 
+        print(
+            f"Publish error: {e}"
+        )
+
         await query.message.reply_text(
-            f"❌ Помилка публікації:\n{e}"
+            "❌ Не вдалося опублікувати пост."
         )
 
 
@@ -506,13 +651,18 @@ async def publish_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ВІДКЛАСТИ
 # ============================================================
 
-async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def schedule_post(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
     await query.answer()
 
-    _, post_id = query.data.split(":", 1)
+    _, post_id = (
+        query.data.split(":", 1)
+    )
 
     if post_id not in posts:
         return
@@ -526,13 +676,18 @@ async def schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # НАЗАД
 # ============================================================
 
-async def back_to_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def back_to_preview(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
     await query.answer()
 
-    _, post_id = query.data.split(":", 1)
+    _, post_id = (
+        query.data.split(":", 1)
+    )
 
     if post_id not in posts:
         return
@@ -546,13 +701,18 @@ async def back_to_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ВИБІР ЧАСУ
 # ============================================================
 
-async def choose_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def choose_time(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
     await query.answer()
 
-    _, post_id, time_string = query.data.split("|", 2)
+    _, post_id, time_string = (
+        query.data.split("|", 2)
+    )
 
     if post_id not in posts:
         return
@@ -571,39 +731,29 @@ async def choose_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         microsecond=0
     )
 
-    # Якщо цей час вже пройшов —
-    # переносимо на завтра.
-
     if target <= now:
-
         target += timedelta(days=1)
 
     delay = (
         target - now
     ).total_seconds()
 
-    job = context.application.job_queue.run_once(
+    context.application.job_queue.run_once(
         scheduled_publish,
-
         when=delay,
-
         data=post_id,
-
         name=post_id
     )
-
-    posts[post_id]["job"] = job
 
     await query.edit_message_reply_markup(
         reply_markup=None
     )
 
     await query.message.reply_text(
-        "⏰ <b>Заплановано!</b>\n\n"
+        "⏰ Заплановано!\n\n"
         f"📅 {target.strftime('%d.%m.%Y')}\n"
         f"🕐 {target.strftime('%H:%M')}\n\n"
-        "Час за Києвом.",
-        parse_mode=ParseMode.HTML
+        "Час за Києвом."
     )
 
 
@@ -611,7 +761,9 @@ async def choose_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ЗАПЛАНОВАНА ПУБЛІКАЦІЯ
 # ============================================================
 
-async def scheduled_publish(context: ContextTypes.DEFAULT_TYPE):
+async def scheduled_publish(
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     post_id = context.job.data
 
@@ -635,18 +787,21 @@ async def scheduled_publish(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# СКАСУВАТИ
+# СКАСУВАННЯ
 # ============================================================
 
-async def cancel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_post(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     query = update.callback_query
 
     await query.answer()
 
-    _, post_id = query.data.split(":", 1)
-
-    # Видаляємо запланований job
+    _, post_id = (
+        query.data.split(":", 1)
+    )
 
     jobs = (
         context.application
@@ -657,18 +812,29 @@ async def cancel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for job in jobs:
         job.schedule_removal()
 
-    if post_id in posts:
-        del posts[post_id]
+    posts.pop(post_id, None)
 
     try:
-
         await query.message.delete()
-
     except Exception:
-
         await query.edit_message_text(
             "❌ Скасовано."
         )
+
+
+# ============================================================
+# ПОМИЛКИ
+# ============================================================
+
+async def error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    print(
+        "BOT ERROR:",
+        context.error
+    )
 
 
 # ============================================================
@@ -678,25 +844,25 @@ async def cancel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
 
     if not BOT_TOKEN:
-
         raise RuntimeError(
             "BOT_TOKEN не знайдено."
         )
 
-    # Web server для Render
-
+    # HTTP для Render Web Service
     threading.Thread(
         target=run_web_server,
         daemon=True
     ).start()
-
-    # Telegram bot
 
     application = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
+
+    # --------------------------------------------------------
+    # HANDLERS
+    # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
@@ -756,10 +922,15 @@ def main():
         )
     )
 
+    application.add_error_handler(
+        error_handler
+    )
+
     print("🤖 Bot started")
 
     application.run_polling(
-        allowed_updates=Update.ALL_TYPES
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
     )
 
 
