@@ -26,9 +26,6 @@ from telegram.ext import (
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-PORT = int(os.environ.get("PORT", "10000"))
-RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
-
 KYIV = ZoneInfo("Europe/Kyiv")
 
 # Тестовий канал
@@ -1046,21 +1043,13 @@ def main():
     application.add_error_handler(
         error_handler
     )
-
-    webhook_url = (
-        RENDER_EXTERNAL_URL.rstrip("/")
-        + "/telegram"
-    )
+ 
 
     logger.info(
         "🤖 Bot starting in WEBHOOK mode"
     )
 
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="telegram",
-        webhook_url=webhook_url,
+    application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
     )
