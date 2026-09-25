@@ -1,4 +1,4 @@
-import os
+дляimport os
 import re
 import logging
 from datetime import datetime, timedelta
@@ -502,7 +502,8 @@ async def send_preview(
         link_options = LinkPreviewOptions(
             is_disabled=False,
             url=preview_url,
-            show_above_text=False,
+            show_above_text=True,
+            prefer_large_media=True,
         )
 
         await context.bot.send_message(
@@ -606,7 +607,8 @@ async def publish_post(
         link_options = LinkPreviewOptions(
             is_disabled=False,
             url=preview_url,
-            show_above_text=False,
+            show_above_text=True,
+            prefer_large_media=True,
         )
 
         await context.bot.send_message(
