@@ -158,9 +158,7 @@ def build_signature(original_length: int):
     entities = []
 
     # offset у UTF-16
-    offset = utf16_len(
-        original_length
-    )
+    offset = original_length
 
     # line1 — bold
     entities.append(
