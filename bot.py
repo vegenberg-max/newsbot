@@ -343,6 +343,11 @@ async def receive_post(
         if urls:
             preview_url = urls[0]
 
+        # Якщо Telegram вже згенерував картинку-прев'ю у вихідному повідомленні,
+        # ми можемо перевірити наявність прикріпленого медіа з лінку:
+        if message.link_preview_options and message.link_preview_options.url:
+            preview_url = message.link_preview_options.url
+
     else:
 
         await message.reply_text(
