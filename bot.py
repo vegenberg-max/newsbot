@@ -29,7 +29,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 KYIV = ZoneInfo("Europe/Kyiv")
 
 CHANNELS = {
-    -1004294187385: "🇷🇴 Українці в Румунії",
+    -1004294187385: "Тестовий",
+    -1001509352451: "🇷🇴 Українці у Румунії 🇺🇦",
 }
 
 posts = {}
