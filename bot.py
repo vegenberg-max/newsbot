@@ -4,6 +4,34 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import sqlite3
+
+# =========================================================
+# DATABASE INITIALIZATION
+# =========================================================
+
+def init_db():
+    conn = sqlite3.connect("posts.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS scheduled_posts (
+            post_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            channel_id INTEGER,
+            text TEXT,
+            preview_url TEXT,
+            photo_file_id TEXT,
+            video_file_id TEXT,
+            publish_time TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Запускаємо створення бази при старті скрипта
+init_db()
+
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -658,6 +686,13 @@ async def publish_now(
             "✅ Пост опубліковано!"
         )
 
+        conn = sqlite3.connect("posts.db")
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
+        conn.commit()
+        conn.close()
+
+
         posts.pop(post_id, None)
 
     except Exception as e:
@@ -791,6 +826,27 @@ async def choose_time(
         name=f"post_{post_id}",
     )
 
+    # Зберігаємо пост у базу даних SQLite
+    conn = sqlite3.connect("posts.db")
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO scheduled_posts 
+        (post_id, user_id, channel_id, text, preview_url, photo_file_id, video_file_id, publish_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        post_id, 
+        post['user_id'], 
+        post['channel_id'], 
+        post['text'], 
+        post['preview_url'], 
+        post['photo_file_id'], 
+        post['video_file_id'], 
+        target.isoformat()
+    ))
+    conn.commit()
+    conn.close()
+
+
     await query.answer(
         "Відкладено ✅"
     )
@@ -848,6 +904,13 @@ async def scheduled_publish(
             post_id,
             None,
         )
+        
+        conn = sqlite3.connect("posts.db")
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
+        conn.commit()
+        conn.close()
+
 
     except Exception:
 
@@ -886,6 +949,13 @@ async def cancel_post(
     await query.edit_message_text(
         "❌ Пост скасовано."
     )
+    
+    conn = sqlite3.connect("posts.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
+    conn.commit()
+    conn.close()
+
 
 
 # =========================================================
