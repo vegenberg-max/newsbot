@@ -775,20 +775,16 @@ async def choose_time(
     if target <= now:
         target += timedelta(days=1)
 
-    delay = (
-        target - now
-    ).total_seconds()
 
     logger.info(
         "⏰ Scheduling post %s for %s | delay=%s",
         post_id,
         target,
-        delay,
     )
 
     context.application.job_queue.run_once(
         scheduled_publish,
-        when=delay,
+        when=target,
         data={
             "post_id": post_id,
         },
