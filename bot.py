@@ -28,13 +28,23 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 KYIV = ZoneInfo("Europe/Kyiv")
 
+# Сюди додавайте ваші канали: ID та Назва
 CHANNELS = {
-    -1004294187385: "Тестовий",
-    -1001509352451: "🇷🇴 Українці у Румунії 🇺🇦",
+    -1004294187385: "Тест",
+    -1001509352451: "🇷🇴 Українці у Румунії",
 }
 
 posts = {}
 user_states = {}  # Зберігає стан редагування: "WAITING_TEXT:<post_id>" або "WAITING_MEDIA:<post_id>"
+
+MONTHS_UA = {
+    1: "січ", 2: "лют", 3: "бер", 4: "кві", 5: "трав", 6: "черв",
+    7: "лип", 8: "серп", 9: "верес", 10: "жовт", 11: "листоп", 12: "груд"
+}
+
+DAYS_UA = {
+    0: "пн", 1: "вт", 2: "ср", 3: "чт", 4: "пт", 5: "сб", 6: "нд"
+}
 
 def init_db():
     conn = sqlite3.connect("posts.db")
@@ -199,10 +209,16 @@ def get_occupied_times():
     for row in rows:
         try:
             dt = datetime.fromisoformat(row[0])
+            occupied.add(dt.strftime("%Y-%m-%d %H:%M"))
             occupied.add(dt.strftime("%H:%M"))
         except Exception:
             pass
     return occupied
+
+def format_date_btn(dt: datetime) -> str:
+    day_name = DAYS_UA[dt.weekday()]
+    month_name = MONTHS_UA[dt.month]
+    return f"{day_name}, {dt.day} {month_name}"
 
 # =========================================================
 # COMMANDS & RECEIVE POST
@@ -219,7 +235,7 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = message.from_user.id
     state = user_states.get(user_id)
 
-    # Якщо ми в режимі очікування нового тексту
+    # Якщо чекаємо новий текст
     if state and state.startswith("WAITING_TEXT:"):
         post_id = state.split(":", 1)[1]
         post = posts.get(post_id)
@@ -235,7 +251,7 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_preview_by_chat_id(user_id, post_id, context)
             return
 
-    # Якщо ми в режимі очікування нового медіа
+    # Якщо чекаємо нове медіа
     if state and state.startswith("WAITING_MEDIA:"):
         post_id = state.split(":", 1)[1]
         post = posts.get(post_id)
@@ -255,7 +271,7 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_preview_by_chat_id(user_id, post_id, context)
             return
 
-    # Звичайний прийом нового поста
+    # Прийом нового поста
     text = ""
     entities = []
     photo_file_id = None
@@ -415,24 +431,46 @@ async def publish_now(query, context, post_id):
         logger.exception("❌ Publish error")
         await query.answer("Помилка публікації.", show_alert=True)
 
-async def schedule_post(query, context, post_id):
+async def schedule_post(query, context, post_id, target_date_str=None):
+    now = datetime.now(KYIV)
+
+    if target_date_str:
+        current_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    else:
+        current_date = now.date()
+
+    prev_date = current_date - timedelta(days=1)
+    next_date = current_date + timedelta(days=1)
+
+    prev_str = prev_date.strftime("%Y-%m-%d")
+    next_str = next_date.strftime("%Y-%m-%d")
+    curr_str = current_date.strftime("%Y-%m-%d")
+
     times = [
         "08:25", "10:25", "11:25", "12:25", "13:25", "14:25", 
         "15:25", "16:25", "17:25", "18:25", "19:25", "20:25", 
         "21:25", "22:00"
     ]
-    
+
     occupied = get_occupied_times()
     keyboard = []
-    row = []
 
+    # Верхній рядок з датою та стрілочками
+    keyboard.append([
+        InlineKeyboardButton("←", callback_data=f"date:{post_id}:{prev_str}"),
+        InlineKeyboardButton(f"🗓 {format_date_btn(current_date)}", callback_data="noop_date"),
+        InlineKeyboardButton("→", callback_data=f"date:{post_id}:{next_str}")
+    ])
+
+    # Слоти часу
+    row = []
     for time_str in times:
-        if time_str in occupied:
-            # Зайнятий слот: показуємо із позначкою та робимо неактивним
+        slot_key = f"{curr_str} {time_str}"
+        if slot_key in occupied or time_str in occupied:
             btn = InlineKeyboardButton(f"📌 {time_str}", callback_data="noop")
         else:
-            btn = InlineKeyboardButton(time_str, callback_data=f"time:{post_id}:{time_str}")
-        
+            btn = InlineKeyboardButton(time_str, callback_data=f"time:{post_id}:{curr_str}:{time_str}")
+
         row.append(btn)
         if len(row) == 3:
             keyboard.append(row)
@@ -441,15 +479,16 @@ async def schedule_post(query, context, post_id):
     if row:
         keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data=f"back:{post_id}")])
+    keyboard.append([InlineKeyboardButton("← Назад", callback_data=f"back:{post_id}")])
 
     await query.answer()
     await query.edit_message_text(
-        "⏰ Обери час публікації:\n(Слоти з позначкою 📌 вже зайняті)",
+        f"🕒 **Час публікації**\n\nОберіть час з меню на **{format_date_btn(current_date)}**:",
         reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
     )
 
-async def choose_time(query, context, post_id, time_string):
+async def choose_time(query, context, post_id, date_string, time_string):
     post = posts.get(post_id)
     if not post:
         await query.answer("Пост не знайдений.", show_alert=True)
@@ -457,15 +496,17 @@ async def choose_time(query, context, post_id, time_string):
 
     try:
         hour, minute = map(int, time_string.split(":"))
+        year, month, day = map(int, date_string.split("-"))
     except ValueError:
-        await query.answer("Помилка формату часу.", show_alert=True)
+        await query.answer("Помилка формату часу чи дати.", show_alert=True)
         return
 
+    target = datetime(year, month, day, hour, minute, tzinfo=KYIV)
     now = datetime.now(KYIV)
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     if target <= now:
-        target += timedelta(days=1)
+        await query.answer("Цей час уже минув! Оберіть майбутній час.", show_alert=True)
+        return
 
     context.application.job_queue.run_once(
         scheduled_publish, when=target, data={"post_id": post_id}, name=f"post_{post_id}"
@@ -485,7 +526,7 @@ async def choose_time(query, context, post_id, time_string):
     conn.close()
 
     await query.answer("Відкладено ✅")
-    await query.edit_message_text(f"⏰ Пост заплановано на {target.strftime('%d.%m %H:%M')}")
+    await query.edit_message_text(f"⏰ Пост заплановано на {target.strftime('%d.%m.%Y о %H:%M')}")
 
 async def scheduled_publish(context: ContextTypes.DEFAULT_TYPE):
     post_id = context.job.data["post_id"]
@@ -529,10 +570,13 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "noop":
-        await query.answer("Цей слот часу вже зайнятий іншим постом!", show_alert=True)
+        await query.answer("Цей слот часу вже зайнятий!", show_alert=True)
+        return
+    elif data == "noop_date":
+        await query.answer("Виберіть день стрілочками ← або →")
         return
 
-    parts = data.split(":", 2)
+    parts = data.split(":")
     action = parts[0]
 
     if action == "channel":
@@ -541,8 +585,10 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await publish_now(query, context, parts[1])
     elif action == "schedule":
         await schedule_post(query, context, parts[1])
+    elif action == "date":
+        await schedule_post(query, context, parts[1], parts[2])
     elif action == "time":
-        await choose_time(query, context, parts[1], parts[2])
+        await choose_time(query, context, parts[1], parts[2], parts[3])
     elif action == "edit_text":
         user_states[query.from_user.id] = f"WAITING_TEXT:{parts[1]}"
         await query.answer()
