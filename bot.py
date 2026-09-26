@@ -1079,6 +1079,87 @@ async def error_handler(
     )
 
 
+
+# Відновлення пропущених постів
+
+async def restore_scheduled_jobs(application):
+    conn = sqlite3.connect("posts.db")
+    cursor = conn.cursor()
+    now = datetime.now(KYIV)
+    
+    cursor.execute("SELECT * FROM scheduled_posts")
+    rows = cursor.fetchall()
+    
+    for row in rows:
+        post_id, user_id, channel_id, text, preview_url, photo_id, video_id, target_str = row
+        target = datetime.fromisoformat(target_str)
+        
+        # Відновлюємо пост у пам'яті бота
+        posts[post_id] = {
+            "user_id": user_id,
+            "channel_id": channel_id,
+            "text": text,
+            "preview_url": preview_url,
+            "photo_file_id": photo_id,
+            "video_file_id": video_id
+        }
+        
+        if target <= now:
+            # ⚠️ ЧАС МИНУВ, поки бот був офлайн: надсилаємо вам сповіщення і сам пост!
+            channel_name = CHANNELS.get(channel_id, "Канал")
+            
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"⚠️ **ПРОПУЩЕНО ПУБЛІКАЦІЮ!**\n\n"
+                    f"📌 **Канал:** {channel_name}\n"
+                    f"⏰ **Час:** {target.strftime('%d.%m о %H:%M')}\n\n"
+                    f"Оберіть під постом нижче, що з ним зробити:"
+                ),
+                parse_mode="Markdown"
+            )
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚀 Опублікувати зараз", callback_data=f"publish:{post_id}")],
+                [InlineKeyboardButton("⏰ Перепланувати", callback_data=f"schedule:{post_id}")],
+                [InlineKeyboardButton("❌ Видалити", callback_data=f"cancel:{post_id}")]
+            ])
+            
+            final_text, final_entities = build_final_content(text, [])
+            
+            if photo_id:
+                await application.bot.send_photo(
+                    chat_id=user_id, photo=photo_id, caption=final_text, 
+                    caption_entities=final_entities, reply_markup=keyboard
+                )
+            elif video_id:
+                await application.bot.send_video(
+                    chat_id=user_id, video=video_id, caption=final_text, 
+                    caption_entities=final_entities, reply_markup=keyboard
+                )
+            else:
+                link_options = LinkPreviewOptions(
+                    is_disabled=False, url=preview_url, 
+                    show_above_text=True, prefer_large_media=True
+                )
+                await application.bot.send_message(
+                    chat_id=user_id, text=final_text, entities=final_entities, 
+                    link_preview_options=link_options, reply_markup=keyboard
+                )
+        else:
+            # ✅ ЧАС МЕЖІ НЕ ПЕРЕЙШОВ: відновлюємо таймер у scheduler
+            application.job_queue.run_once(
+                scheduled_publish,
+                when=target,
+                data={"post_id": post_id},
+                name=f"post_{post_id}"
+            )
+            
+    conn.close()
+
+
+
+
 # =========================================================
 # MAIN
 # =========================================================
@@ -1119,6 +1200,10 @@ def main():
     logger.info(
         "🤖 Bot starting in WEBHOOK mode"
     )
+
+    # Відновлюємо збережені пости при запуску бота
+    application.job_queue.run_once(lambda ctx: restore_scheduled_jobs(application), when=0)
+
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
