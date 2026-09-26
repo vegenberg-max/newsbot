@@ -776,28 +776,21 @@ async def schedule_post(
 # CHOOSE TIME
 # =========================================================
 
-async def choose_time(
-    query,
-    context,
-    post_id,
-    time_string,
-):
-
+async def choose_time(query, context, post_id, time_string):
     post = posts.get(post_id)
 
     if not post:
-        await query.answer(
-            "Пост не знайдений.",
-            show_alert=True,
-        )
+        await query.answer("Пост не знайдений.", show_alert=True)
+        return
+
+    try:
+        hour, minute = map(int, time_string.split(":"))
+    except ValueError:
+        logger.error("❌ Invalid time format received: %s", time_string)
+        await query.answer("Помилка формату часу.", show_alert=True)
         return
 
     now = datetime.now(KYIV)
-
-    hour, minute = map(
-        int,
-        time_string.split(":"),
-    )
 
     target = now.replace(
         hour=hour,
@@ -806,27 +799,18 @@ async def choose_time(
         microsecond=0,
     )
 
-    # Якщо час уже минув — ставимо на завтра
     if target <= now:
         target += timedelta(days=1)
 
-
-    logger.info(
-        "⏰ Scheduling post %s for %s | delay=%s",
-        post_id,
-        target,
-    )
+    logger.info("⏰ Scheduling post %s for %s", post_id, target)
 
     context.application.job_queue.run_once(
         scheduled_publish,
         when=target,
-        data={
-            "post_id": post_id,
-        },
+        data={"post_id": post_id},
         name=f"post_{post_id}",
     )
 
-    # Зберігаємо пост у базу даних SQLite
     conn = sqlite3.connect("posts.db")
     cursor = conn.cursor()
     cursor.execute('''
@@ -846,15 +830,11 @@ async def choose_time(
     conn.commit()
     conn.close()
 
-
-    await query.answer(
-        "Відкладено ✅"
-    )
-
+    await query.answer("Відкладено ✅")
     await query.edit_message_text(
-        f"⏰ Пост заплановано на "
-        f"{target.strftime('%d.%m %H:%M')}"
+        f"⏰ Пост заплановано на {target.strftime('%d.%m %H:%M')}"
     )
+
 
 
 # =========================================================
@@ -971,7 +951,7 @@ async def callbacks(
 
     data = query.data
 
-    parts = data.split(":")
+    parts = data.split(":",2)
 
     action = parts[0]
 
