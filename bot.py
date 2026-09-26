@@ -1099,6 +1099,7 @@ async def restore_scheduled_jobs(application):
             "user_id": user_id,
             "channel_id": channel_id,
             "text": text,
+            "entities": [],
             "preview_url": preview_url,
             "photo_file_id": photo_id,
             "video_file_id": video_id
@@ -1197,18 +1198,19 @@ def main():
     )
  
 
-    logger.info(
-        "🤖 Bot starting in WEBHOOK mode"
-    )
+    logger.info("🤖 Bot starting...")
 
-    # Відновлюємо збережені пости при запуску бота
-    application.job_queue.run_once(lambda ctx: restore_scheduled_jobs(application), when=0)
+    # Безпечний запуск відновлення завдань при старті
+    async def _on_startup(context: ContextTypes.DEFAULT_TYPE):
+        await restore_scheduled_jobs(context.application)
 
+    application.job_queue.run_once(_on_startup, when=0)
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
     )
+
 
 
 if __name__ == "__main__":
