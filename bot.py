@@ -29,7 +29,7 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 KYIV = ZoneInfo("Europe/Kyiv")
 
-# Оновлені налаштування каналів
+# Налаштування каналів
 CHANNELS = {
     -1004294187385: "Тест",
     -1001509352451: "🇷🇴 Українці у Румунії",
@@ -198,22 +198,6 @@ def build_final_content(text, entities):
     signature, signature_entities = build_signature(original_length)
     return text + signature, entities + signature_entities
 
-def get_occupied_times():
-    conn = sqlite3.connect("posts.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT publish_time FROM scheduled_posts")
-    rows = cursor.fetchall()
-    conn.close()
-
-    occupied = set()
-    for row in rows:
-        try:
-            dt = datetime.fromisoformat(row[0])
-            occupied.add(dt.strftime("%Y-%m-%d %H:%M"))
-        except Exception:
-            pass
-    return occupied
-
 def format_date_btn(dt: datetime) -> str:
     day_name = DAYS_UA[dt.weekday()]
     month_name = MONTHS_UA[dt.month]
@@ -224,7 +208,53 @@ def format_date_btn(dt: datetime) -> str:
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Перешли мені новину.\n\nЯ покажу її перед публікацією.")
+    await update.message.reply_text(
+        "👋 **Вітаю!**\n\n"
+        "• Надішліть або перешліть новину для публікації.\n"
+        "• Використовуйте команду /scheduled для перегляду та керування відкладеними постами.",
+        parse_mode="Markdown"
+    )
+
+async def show_scheduled_list(update_or_query, context):
+    conn = sqlite3.connect("posts.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT post_id, text, publish_time FROM scheduled_posts ORDER BY publish_time ASC")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        msg = "🗓 **Список запланованих постів порожній.**"
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg, parse_mode="Markdown")
+        else:
+            await update_or_query.message.reply_text(msg, parse_mode="Markdown")
+        return
+
+    text_content = "🗓 **Заплановані пости:**\n\n"
+    keyboard = []
+
+    for idx, row in enumerate(rows, 1):
+        post_id, raw_text, target_str = row
+        dt = datetime.fromisoformat(target_str)
+        date_fmt = dt.strftime("%d.%m %H:%M")
+
+        clean_text = (raw_text or "").strip().replace("\n", " ")
+        short_text = clean_text[:30] + "..." if len(clean_text) > 30 else clean_text
+        if not short_text:
+            short_text = "Медіаповідомлення"
+
+        text_content += f"{idx}. ⏰ **{date_fmt}** — *{short_text}*\n"
+        keyboard.append([InlineKeyboardButton(f"⚙️ Пост #{idx} ({date_fmt})", callback_data=f"manage:{post_id}")])
+
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.answer()
+        await update_or_query.edit_message_text(
+            text_content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        )
+    else:
+        await update_or_query.message.reply_text(
+            text_content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        )
 
 async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -243,6 +273,13 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             urls = extract_urls(post["text"], post["entities"])
             if urls:
                 post["preview_url"] = urls[0]
+
+            # Оновлюємо також у БД
+            conn = sqlite3.connect("posts.db")
+            cursor = conn.cursor()
+            cursor.execute("UPDATE scheduled_posts SET text = ? WHERE post_id = ?", (post["text"], post_id))
+            conn.commit()
+            conn.close()
             
             user_states.pop(user_id, None)
             await message.reply_text("✅ Текст успішно оновлено!")
@@ -262,6 +299,15 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await message.reply_text("❌ Будь ласка, надішліть фото або відео.")
                 return
+
+            conn = sqlite3.connect("posts.db")
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE scheduled_posts SET photo_file_id = ?, video_file_id = ? WHERE post_id = ?",
+                (post["photo_file_id"], post["video_file_id"], post_id)
+            )
+            conn.commit()
+            conn.close()
 
             user_states.pop(user_id, None)
             await message.reply_text("✅ Медіа успішно замінено!")
@@ -353,8 +399,9 @@ async def send_preview_by_chat_id(chat_id, post_id, context):
             InlineKeyboardButton("🖼 Замінити медіа", callback_data=f"edit_media:{post_id}")
         ],
         [InlineKeyboardButton("🚀 Опублікувати зараз", callback_data=f"publish:{post_id}")],
-        [InlineKeyboardButton("⏰ Відкласти", callback_data=f"schedule:{post_id}")],
-        [InlineKeyboardButton("❌ Скасувати", callback_data=f"cancel:{post_id}")],
+        [InlineKeyboardButton("⏰ Переставити час", callback_data=f"schedule:{post_id}")],
+        [InlineKeyboardButton("🗑 Видалити пост", callback_data=f"cancel:{post_id}")],
+        [InlineKeyboardButton("📋 До списку постів", callback_data="show_list")]
     ])
 
     preview_url = post.get("preview_url")
@@ -579,6 +626,11 @@ async def process_schedule(update_or_query, context, post_id, date_string, time_
             await target_obj.reply_text(f"❌ {msg}")
         return
 
+    # Видаляємо стару таску якщо міняємо час
+    jobs = context.application.job_queue.get_jobs_by_name(f"post_{post_id}")
+    for job in jobs:
+        job.schedule_removal()
+
     context.application.job_queue.run_once(
         scheduled_publish, when=target, data={"post_id": post_id}, name=f"post_{post_id}"
     )
@@ -599,7 +651,12 @@ async def process_schedule(update_or_query, context, post_id, date_string, time_
     success_msg = f"⏰ Пост заплановано на {target.strftime('%d.%m.%Y о %H:%M')}"
     if hasattr(update_or_query, 'answer'):
         await update_or_query.answer("Відкладено ✅")
-        await update_or_query.edit_message_text(success_msg)
+        await update_or_query.edit_message_text(
+            f"✅ {success_msg}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 До списку постів", callback_data="show_list")]
+            ])
+        )
     else:
         await target_obj.reply_text(f"✅ {success_msg}")
 
@@ -627,14 +684,14 @@ async def cancel_post(query, context, post_id):
     for job in jobs:
         job.schedule_removal()
 
-    await query.answer("Скасовано")
-    await query.edit_message_text("❌ Пост скасовано.")
-
     conn = sqlite3.connect("posts.db")
     cursor = conn.cursor()
     cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
     conn.commit()
     conn.close()
+
+    await query.answer("Видалено")
+    await show_scheduled_list(query, context)
 
 # =========================================================
 # CALLBACK ROUTER
@@ -650,11 +707,17 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "noop_date":
         await query.answer("Виберіть день стрілочками ← або →")
         return
+    elif data == "show_list":
+        await show_scheduled_list(query, context)
+        return
 
     parts = data.split(":")
     action = parts[0]
 
-    if action == "channel":
+    if action == "manage":
+        post_id = parts[1]
+        await send_preview(query, post_id, context)
+    elif action == "channel":
         await select_channel(query, context, parts[1], int(parts[2]))
     elif action == "publish":
         await publish_now(query, context, parts[1])
@@ -718,6 +781,7 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("scheduled", show_scheduled_list))
     application.add_handler(MessageHandler(filters.ALL, receive_post))
     application.add_handler(CallbackQueryHandler(callbacks))
 
