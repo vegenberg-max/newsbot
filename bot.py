@@ -469,7 +469,37 @@ async def schedule_post(query, context, post_id, target_date_str=None):
         "17:25", "18:25", "19:25", "20:25", "21:25", "22:00"
     ]
 
-    occupied = get_occupied_times()
+    # Отримуємо деталі запланованих постів з бази даних
+    conn = sqlite3.connect("posts.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT publish_time, text FROM scheduled_posts")
+    rows = cursor.fetchall()
+    conn.close()
+
+    occupied = set()
+    day_posts = []
+
+    for row in rows:
+        try:
+            dt = datetime.fromisoformat(row[0])
+            slot_key = dt.strftime("%Y-%m-%d %H:%M")
+            occupied.add(slot_key)
+
+            # Якщо пост заплановано саме на обраний день
+            if dt.date() == current_date:
+                raw_text = (row[1] or "").strip().replace("\n", " ")
+                # Беремо перші 40 символів для заголовка
+                short_text = raw_text[:40] + "..." if len(raw_text) > 40 else raw_text
+                if not short_text:
+                    short_text = "Медіаповідомлення"
+                
+                day_posts.append((dt.strftime("%H:%M"), short_text))
+        except Exception:
+            pass
+
+    # Сортуємо пости за часом
+    day_posts.sort(key=lambda x: x[0])
+
     keyboard = []
 
     # Верхній рядок з датою та стрілочками
@@ -479,22 +509,20 @@ async def schedule_post(query, context, post_id, target_date_str=None):
         InlineKeyboardButton("→", callback_data=f"date:{post_id}:{next_str}")
     ])
 
-    # Перевірка часу та створення кнопок (пропускаємо минулий час)
+    # Формуємо сітку кнопок часу
     row = []
     for time_str in times:
         slot_dt_str = f"{curr_str} {time_str}"
         hour, minute = map(int, time_str.split(":"))
         slot_dt = datetime(current_date.year, current_date.month, current_date.day, hour, minute, tzinfo=KYIV)
 
-        # Якщо час уже минув — просто пропускаємо його
+        # Приховуємо минулий час для сьогоднішнього дня
         if slot_dt < now:
             continue
 
         if slot_dt_str in occupied:
-            # Зайнятий слот
             btn = InlineKeyboardButton(f"📌 {time_str}", callback_data="noop")
         else:
-            # Доступний слот
             btn = InlineKeyboardButton(time_str, callback_data=f"time:{post_id}:{curr_str}:{time_str}")
 
         row.append(btn)
@@ -505,16 +533,28 @@ async def schedule_post(query, context, post_id, target_date_str=None):
     if row:
         keyboard.append(row)
 
-    # Кнопка для ручного введення та кнопка Назад
     keyboard.append([InlineKeyboardButton("✍️ Вибрати годину та хвилини", callback_data=f"manual_time:{post_id}:{curr_str}")])
     keyboard.append([InlineKeyboardButton("← Назад", callback_data=f"back:{post_id}")])
 
+    # Формуємо текст з переліком запланованих постів
+    text_content = f"🕒 **Час публікації**\n\n"
+    if day_posts:
+        text_content += f"**Заплановані пости на {format_date_btn(current_date)}:**\n"
+        for time_p, title_p in day_posts:
+            text_content += f"📍 **{time_p}** — *{title_p}*\n"
+        text_content += "\n"
+    else:
+        text_content += f"На {format_date_btn(current_date)} немає запланованих постів.\n\n"
+
+    text_content += f"Оберіть час з меню або надішліть його текстом:"
+
     await query.answer()
     await query.edit_message_text(
-        f"🕒 **Час публікації**\n\nОберіть час з меню на **{format_date_btn(current_date)}** або надішліть його текстом:",
+        text_content,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
+
 
 async def process_schedule(update_or_query, context, post_id, date_string, time_string):
     post = posts.get(post_id)
