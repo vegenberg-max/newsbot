@@ -38,11 +38,10 @@ CHANNELS = {
     -1001509352451: "🇷🇴 Українці у Румунії",
 }
 
-# Шлях до бази даних (на Render використовуйте Persistent Disk, наприклад /var/data/posts.db)
 DB_PATH = os.environ.get("DB_PATH", "posts.db")
 
 posts = {}
-user_states = {}  # Зберігає стан користувача
+user_states = {}
 
 MONTHS_UA = {
     1: "січ", 2: "лют", 3: "бер", 4: "кві", 5: "трав", 6: "черв",
@@ -77,7 +76,7 @@ def init_db():
 
 init_db()
 
-# Маскуємо токени в логах, приховуючи підробні HTTP-запити
+# Логування та закриття токена від HTTPX
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -230,6 +229,16 @@ def format_date_btn(dt: datetime) -> str:
     month_name = MONTHS_UA[dt.month]
     return f"{day_name}, {dt.day} {month_name}"
 
+async def safe_edit_or_reply(query, text, reply_markup=None, parse_mode=None):
+    """Безпечне оновлення меню для будь-яких типів повідомлень (текст/медіа)."""
+    try:
+        if query.message.photo or query.message.video:
+            await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        else:
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
 # =========================================================
 # COMMANDS & RECEIVE POST
 # =========================================================
@@ -259,7 +268,7 @@ async def show_scheduled_list(update_or_query, context):
     if not rows:
         msg = "🗓 **Список запланованих постів порожній.**"
         if hasattr(update_or_query, 'edit_message_text'):
-            await update_or_query.edit_message_text(msg, parse_mode="Markdown")
+            await safe_edit_or_reply(update_or_query, msg, parse_mode="Markdown")
         else:
             await update_or_query.message.reply_text(msg, parse_mode="Markdown")
         return
@@ -273,6 +282,8 @@ async def show_scheduled_list(update_or_query, context):
         date_fmt = dt.strftime("%d.%m %H:%M")
 
         clean_text = (raw_text or "").strip().replace("\n", " ")
+        # Экранирование спецсимволов для безопасного Markdown
+        clean_text = re.sub(r'[*_`\[\]]', '', clean_text)
         short_text = clean_text[:30] + "..." if len(clean_text) > 30 else clean_text
         if not short_text:
             short_text = "Медіаповідомлення"
@@ -281,9 +292,10 @@ async def show_scheduled_list(update_or_query, context):
         keyboard.append([InlineKeyboardButton(f"⚙️ Пост #{idx} ({date_fmt})", callback_data=f"manage:{post_id}")])
 
     if hasattr(update_or_query, 'edit_message_text'):
-        await update_or_query.answer()
-        await update_or_query.edit_message_text(
-            text_content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
+        if hasattr(update_or_query, 'answer'):
+            await update_or_query.answer()
+        await safe_edit_or_reply(
+            update_or_query, text_content, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown"
         )
     else:
         await update_or_query.message.reply_text(
@@ -308,14 +320,13 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             post["text"] = message.text or message.caption or ""
             post["entities"] = copy_entities(message.entities or message.caption_entities)
             urls = extract_urls(post["text"], post["entities"])
-            if urls:
-                post["preview_url"] = urls[0]
+            post["preview_url"] = urls[0] if urls else None
 
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE scheduled_posts SET text = ?, entities_json = ? WHERE post_id = ?",
-                (post["text"], serialize_entities(post["entities"]), post_id)
+                "UPDATE scheduled_posts SET text = ?, entities_json = ?, preview_url = ? WHERE post_id = ?",
+                (post["text"], serialize_entities(post["entities"]), post["preview_url"], post_id)
             )
             conn.commit()
             conn.close()
@@ -401,7 +412,6 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Цей тип повідомлення поки не підтримується.")
         return
 
-    # Генеруємо надійний унікальний ID для поста
     post_id = str(uuid.uuid4())
     posts[post_id] = {
         "user_id": user_id,
@@ -480,7 +490,7 @@ async def select_channel(query, context, post_id, channel_id):
 
     post["channel_id"] = channel_id
     await query.answer()
-    await query.edit_message_text("📢 Канал вибрано.\n\nЗараз покажу пост перед публікацією.")
+    await safe_edit_or_reply(query, "📢 Канал вибрано.\n\nЗараз покажу пост перед публікацією.")
     await send_preview(query, post_id, context)
 
 async def publish_post(context, post):
@@ -515,7 +525,6 @@ async def publish_now(query, context, post_id):
         return
 
     try:
-        # Спочатку видаляємо з бази, щоб запобігти дублюванню при перезапуску під час публікації
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
@@ -524,7 +533,7 @@ async def publish_now(query, context, post_id):
 
         await publish_post(context, post)
         await query.answer("Опубліковано ✅")
-        await query.edit_message_text("✅ Пост опубліковано!")
+        await safe_edit_or_reply(query, "✅ Пост опубліковано!")
 
         posts.pop(post_id, None)
     except Exception:
@@ -572,7 +581,8 @@ async def schedule_post(query, context, post_id, target_date_str=None):
 
             if dt.date() == current_date:
                 raw_text = (row[1] or "").strip().replace("\n", " ")
-                short_text = raw_text[:40] + "..." if len(raw_text) > 40 else raw_text
+                clean_text = re.sub(r'[*_`\[\]]', '', raw_text)
+                short_text = clean_text[:40] + "..." if len(clean_text) > 40 else clean_text
                 if not short_text:
                     short_text = "Медіаповідомлення"
                 
@@ -598,10 +608,13 @@ async def schedule_post(query, context, post_id, target_date_str=None):
         if slot_dt < now:
             continue
 
+        # Зміна делімітера для кнопки, щоб уникнути багу split(":")
+        time_safe = time_str.replace(":", "-")
+
         if slot_dt_str in occupied:
             btn = InlineKeyboardButton(f"📌 {time_str}", callback_data="noop")
         else:
-            btn = InlineKeyboardButton(time_str, callback_data=f"time:{post_id}:{curr_str}:{time_str}")
+            btn = InlineKeyboardButton(time_str, callback_data=f"time:{post_id}:{curr_str}:{time_safe}")
 
         row.append(btn)
         if len(row) == 3:
@@ -626,7 +639,8 @@ async def schedule_post(query, context, post_id, target_date_str=None):
     text_content += f"Оберіть час з меню або надішліть його текстом:"
 
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit_or_reply(
+        query,
         text_content,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -648,6 +662,8 @@ async def process_schedule(update_or_query, context, post_id, date_string, time_
         return
 
     try:
+        # Нормалізація роздільника часу після безпечних кнопок
+        time_string = time_string.replace("-", ":")
         hour, minute = map(int, time_string.split(":"))
         year, month, day = map(int, date_string.split("-"))
         target = datetime(year, month, day, hour, minute, tzinfo=KYIV)
@@ -693,7 +709,8 @@ async def process_schedule(update_or_query, context, post_id, date_string, time_
     success_msg = f"⏰ Пост заплановано на {target.strftime('%d.%m.%Y о %H:%M')}"
     if hasattr(update_or_query, 'answer'):
         await update_or_query.answer("Відкладено ✅")
-        await update_or_query.edit_message_text(
+        await safe_edit_or_reply(
+            update_or_query,
             f"✅ {success_msg}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📋 До списку постів", callback_data="show_list")]
@@ -709,7 +726,6 @@ async def scheduled_publish(context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # Видаляємо з БД перед публікацією
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
@@ -788,6 +804,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer()
         await query.message.reply_text("🖼 Надішліть нове фото або відео для цього поста:")
     elif action == "back":
+        await query.answer()
         await send_preview(query, parts[1], context)
     elif action == "cancel":
         await cancel_post(query, context, parts[1])
@@ -796,7 +813,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # RESTORE & MAIN
 # =========================================================
 
-async def restore_scheduled_jobs(application):
+async def restore_scheduled_jobs(application: Application):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     now = datetime.now(KYIV)
@@ -826,18 +843,19 @@ async def restore_scheduled_jobs(application):
 
     conn.close()
 
+async def post_init(application: Application):
+    """Надійне відновлення завдань до початку запуску поллінгу."""
+    await restore_scheduled_jobs(application)
+
 def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("scheduled", show_scheduled_list))
-    application.add_handler(MessageHandler(filters.ALL, receive_post))
+    # Ігноруємо відредаговані повідомлення, щоб не скидати стан постів
+    application.add_handler(MessageHandler(filters.ALL & ~filters.UpdateType.EDITED_MESSAGE, receive_post))
     application.add_handler(CallbackQueryHandler(callbacks))
 
-    async def _on_startup(context: ContextTypes.DEFAULT_TYPE):
-        await restore_scheduled_jobs(context.application)
-
-    application.job_queue.run_once(_on_startup, when=0)
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
