@@ -27,6 +27,8 @@ from telegram.ext import (
 # =========================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_ID = 1598181428  # Ваш Telegram ID
+
 KYIV = ZoneInfo("Europe/Kyiv")
 
 # Налаштування каналів
@@ -46,6 +48,9 @@ MONTHS_UA = {
 DAYS_UA = {
     0: "пн", 1: "вт", 2: "ср", 3: "чт", 4: "пт", 5: "сб", 6: "нд"
 }
+
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
 
 def init_db():
     conn = sqlite3.connect("posts.db")
@@ -208,6 +213,9 @@ def format_date_btn(dt: datetime) -> str:
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
     await update.message.reply_text(
         "👋 **Вітаю!**\n\n"
         "• Надішліть або перешліть новину для публікації.\n"
@@ -216,6 +224,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def show_scheduled_list(update_or_query, context):
+    user_id = update_or_query.effective_user.id if hasattr(update_or_query, 'effective_user') else update_or_query.from_user.id
+    if not is_admin(user_id):
+        return
+
     conn = sqlite3.connect("posts.db")
     cursor = conn.cursor()
     cursor.execute("SELECT post_id, text, publish_time FROM scheduled_posts ORDER BY publish_time ASC")
@@ -262,6 +274,9 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = message.from_user.id
+    if not is_admin(user_id):
+        return
+
     state = user_states.get(user_id)
 
     if state and state.startswith("WAITING_TEXT:"):
@@ -274,7 +289,6 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if urls:
                 post["preview_url"] = urls[0]
 
-            # Оновлюємо також у БД
             conn = sqlite3.connect("posts.db")
             cursor = conn.cursor()
             cursor.execute("UPDATE scheduled_posts SET text = ? WHERE post_id = ?", (post["text"], post_id))
@@ -626,7 +640,6 @@ async def process_schedule(update_or_query, context, post_id, date_string, time_
             await target_obj.reply_text(f"❌ {msg}")
         return
 
-    # Видаляємо стару таску якщо міняємо час
     jobs = context.application.job_queue.get_jobs_by_name(f"post_{post_id}")
     for job in jobs:
         job.schedule_removal()
@@ -699,6 +712,10 @@ async def cancel_post(query, context, post_id):
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Немає доступу.", show_alert=True)
+        return
+
     data = query.data
 
     if data == "noop":
