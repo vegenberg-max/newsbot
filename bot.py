@@ -3,6 +3,7 @@ import re
 import json
 import logging
 import sqlite3
+import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -37,6 +38,9 @@ CHANNELS = {
     -1001509352451: "🇷🇴 Українці у Румунії",
 }
 
+# Шлях до бази даних (на Render використовуйте Persistent Disk, наприклад /var/data/posts.db)
+DB_PATH = os.environ.get("DB_PATH", "posts.db")
+
 posts = {}
 user_states = {}  # Зберігає стан користувача
 
@@ -53,7 +57,7 @@ def is_admin(user_id: int) -> bool:
     return user_id == ADMIN_ID
 
 def init_db():
-    conn = sqlite3.connect("posts.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS scheduled_posts (
@@ -61,6 +65,7 @@ def init_db():
             user_id INTEGER,
             channel_id INTEGER,
             text TEXT,
+            entities_json TEXT,
             preview_url TEXT,
             photo_file_id TEXT,
             video_file_id TEXT,
@@ -72,10 +77,13 @@ def init_db():
 
 init_db()
 
+# Маскуємо токени в логах, приховуючи підробні HTTP-запити
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # =========================================================
@@ -102,6 +110,20 @@ def copy_entities(entities):
             )
         )
     return result
+
+def serialize_entities(entities):
+    if not entities:
+        return json.dumps([])
+    return json.dumps([e.to_dict() for e in entities])
+
+def deserialize_entities(json_str):
+    if not json_str:
+        return []
+    try:
+        raw_list = json.loads(json_str)
+        return [MessageEntity.de_json(d) for d in raw_list if d]
+    except Exception:
+        return []
 
 def extract_urls(text, entities):
     urls = []
@@ -228,7 +250,7 @@ async def show_scheduled_list(update_or_query, context):
     if not is_admin(user_id):
         return
 
-    conn = sqlite3.connect("posts.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT post_id, text, publish_time FROM scheduled_posts ORDER BY publish_time ASC")
     rows = cursor.fetchall()
@@ -247,7 +269,7 @@ async def show_scheduled_list(update_or_query, context):
 
     for idx, row in enumerate(rows, 1):
         post_id, raw_text, target_str = row
-        dt = datetime.fromisoformat(target_str)
+        dt = datetime.fromisoformat(target_str).astimezone(KYIV)
         date_fmt = dt.strftime("%d.%m %H:%M")
 
         clean_text = (raw_text or "").strip().replace("\n", " ")
@@ -289,9 +311,12 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if urls:
                 post["preview_url"] = urls[0]
 
-            conn = sqlite3.connect("posts.db")
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute("UPDATE scheduled_posts SET text = ? WHERE post_id = ?", (post["text"], post_id))
+            cursor.execute(
+                "UPDATE scheduled_posts SET text = ?, entities_json = ? WHERE post_id = ?",
+                (post["text"], serialize_entities(post["entities"]), post_id)
+            )
             conn.commit()
             conn.close()
             
@@ -314,7 +339,7 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("❌ Будь ласка, надішліть фото або відео.")
                 return
 
-            conn = sqlite3.connect("posts.db")
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE scheduled_posts SET photo_file_id = ?, video_file_id = ? WHERE post_id = ?",
@@ -376,7 +401,8 @@ async def receive_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("❌ Цей тип повідомлення поки не підтримується.")
         return
 
-    post_id = str(message.message_id)
+    # Генеруємо надійний унікальний ID для поста
+    post_id = str(uuid.uuid4())
     posts[post_id] = {
         "user_id": user_id,
         "text": text,
@@ -489,15 +515,16 @@ async def publish_now(query, context, post_id):
         return
 
     try:
-        await publish_post(context, post)
-        await query.answer("Опубліковано ✅")
-        await query.edit_message_text("✅ Пост опубліковано!")
-
-        conn = sqlite3.connect("posts.db")
+        # Спочатку видаляємо з бази, щоб запобігти дублюванню при перезапуску під час публікації
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
         conn.commit()
         conn.close()
+
+        await publish_post(context, post)
+        await query.answer("Опубліковано ✅")
+        await query.edit_message_text("✅ Пост опубліковано!")
 
         posts.pop(post_id, None)
     except Exception:
@@ -528,7 +555,7 @@ async def schedule_post(query, context, post_id, target_date_str=None):
         "17:25", "18:25", "19:25", "20:25", "21:25", "22:00"
     ]
 
-    conn = sqlite3.connect("posts.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT publish_time, text FROM scheduled_posts")
     rows = cursor.fetchall()
@@ -539,7 +566,7 @@ async def schedule_post(query, context, post_id, target_date_str=None):
 
     for row in rows:
         try:
-            dt = datetime.fromisoformat(row[0])
+            dt = datetime.fromisoformat(row[0]).astimezone(KYIV)
             slot_key = dt.strftime("%Y-%m-%d %H:%M")
             occupied.add(slot_key)
 
@@ -648,14 +675,16 @@ async def process_schedule(update_or_query, context, post_id, date_string, time_
         scheduled_publish, when=target, data={"post_id": post_id}, name=f"post_{post_id}"
     )
 
-    conn = sqlite3.connect("posts.db")
+    entities_json = serialize_entities(post.get("entities"))
+
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
         INSERT OR REPLACE INTO scheduled_posts 
-        (post_id, user_id, channel_id, text, preview_url, photo_file_id, video_file_id, publish_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (post_id, user_id, channel_id, text, entities_json, preview_url, photo_file_id, video_file_id, publish_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
-        post_id, post['user_id'], post['channel_id'], post['text'], 
+        post_id, post['user_id'], post['channel_id'], post['text'], entities_json,
         post['preview_url'], post['photo_file_id'], post['video_file_id'], target.isoformat()
     ))
     conn.commit()
@@ -680,14 +709,15 @@ async def scheduled_publish(context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await publish_post(context, post)
-        posts.pop(post_id, None)
-
-        conn = sqlite3.connect("posts.db")
+        # Видаляємо з БД перед публікацією
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
         conn.commit()
         conn.close()
+
+        await publish_post(context, post)
+        posts.pop(post_id, None)
     except Exception:
         logger.exception("❌ BOT ERROR while scheduled publishing")
 
@@ -697,7 +727,7 @@ async def cancel_post(query, context, post_id):
     for job in jobs:
         job.schedule_removal()
 
-    conn = sqlite3.connect("posts.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("DELETE FROM scheduled_posts WHERE post_id = ?", (post_id,))
     conn.commit()
@@ -767,21 +797,23 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def restore_scheduled_jobs(application):
-    conn = sqlite3.connect("posts.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     now = datetime.now(KYIV)
     cursor.execute("SELECT * FROM scheduled_posts")
     rows = cursor.fetchall()
 
     for row in rows:
-        post_id, user_id, channel_id, text, preview_url, photo_id, video_id, target_str = row
-        target = datetime.fromisoformat(target_str)
+        post_id, user_id, channel_id, text, entities_json, preview_url, photo_id, video_id, target_str = row
+        target = datetime.fromisoformat(target_str).astimezone(KYIV)
+
+        entities = deserialize_entities(entities_json)
 
         posts[post_id] = {
             "user_id": user_id,
             "channel_id": channel_id,
             "text": text or "",
-            "entities": [],
+            "entities": entities,
             "preview_url": preview_url,
             "photo_file_id": photo_id,
             "video_file_id": video_id
