@@ -52,14 +52,13 @@ TIMES = (
 
 DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 MONTHS_UA = [
-    "верес", "жовт", "лист", "груд",
-    "січ", "лют", "берез", "квіт", "трав", "черв", "лип", "серп"
+    "січ", "лют", "берез", "квіт", "трав", "черв", 
+    "лип", "серп", "верес", "жовт", "лист", "груд"
 ]
 
+
 def format_date_ua(dt):
-    # Українські місяці за номерами (1 = січ, 9 = верес і т.д.)
-    months = ["січ", "лют", "берез", "квіт", "трав", "черв", "лип", "серп", "верес", "жовт", "лист", "груд"]
-    return f"{DAYS_UA[dt.weekday()]}, {dt.day} {months[dt.month - 1]}"
+    return f"{DAYS_UA[dt.weekday()]}, {dt.day} {MONTHS_UA[dt.month - 1]}"
 
 
 def service(context):
@@ -205,6 +204,19 @@ async def listing(target, context, page=0, history=False):
     await present(target, text, rows)
 
 
+async def get_daily_items(pub, post, start_ts, end_ts):
+    """Отримує всі відкладені пости на день. Якщо канал не обрано — опитує всі канали."""
+    if post.get("channel_id"):
+        return await db_call(pub.store.daily_posts, post["channel_id"], start_ts, end_ts, post["id"])
+    
+    all_items = []
+    for ch_id in pub.settings.channels.keys():
+        items = await db_call(pub.store.daily_posts, ch_id, start_ts, end_ts, post["id"])
+        all_items.extend(items)
+    all_items.sort(key=lambda x: x["publish_at"])
+    return all_items
+
+
 async def calendar(target, post, context, day=None):
     pub = service(context)
     pub.validate(post)
@@ -222,16 +234,12 @@ async def calendar(target, post, context, day=None):
     if selected < today or selected > today + timedelta(days=366):
         raise ContentError("Оберіть дату від сьогоднішнього дня до року вперед.")
         
-    day = selected.isoformat()
+    day_str = selected.isoformat()
     midnight = datetime.combine(selected, datetime.min.time(), tzinfo=tz)
+    start_ts = int(midnight.timestamp())
+    end_ts = int((midnight + timedelta(days=1)).timestamp())
     
-    daily_items = await db_call(
-        pub.store.daily_posts,
-        post["channel_id"],
-        int(midnight.timestamp()),
-        int((midnight + timedelta(days=1)).timestamp()),
-        post["id"],
-    )
+    daily_items = await get_daily_items(pub, post, start_ts, end_ts)
     occupied = {item["publish_at"] for item in daily_items}
 
     date_ua = format_date_ua(selected)
@@ -252,16 +260,13 @@ async def calendar(target, post, context, day=None):
     prev_day = selected - timedelta(days=1)
     next_day = selected + timedelta(days=1)
 
-    # Ліва стрілка
     if selected > today:
         nav.append(Button("←", callback_data=action("day", post, prev_day.isoformat())))
     else:
         nav.append(Button(" ", callback_data="busy"))
 
-    # Кнопка дати по центру
     nav.append(Button(f"🗓 {date_ua}", callback_data="busy"))
 
-    # Права стрілка
     if selected < today + timedelta(days=366):
         nav.append(Button("→", callback_data=action("day", post, next_day.isoformat())))
 
@@ -270,13 +275,13 @@ async def calendar(target, post, context, day=None):
     current = []
     for value in TIMES:
         try:
-            stamp = parse_local_time(day, value, pub.settings.timezone, int(time.time()))
+            stamp = parse_local_time(day_str, value, pub.settings.timezone, int(time.time()))
         except ContentError:
             continue
         if stamp in occupied:
             current.append(Button("Зайнято " + value, callback_data="busy"))
         else:
-            data = day.replace("-", "") + value.replace(":", "")
+            data = day_str.replace("-", "") + value.replace(":", "")
             current.append(Button(value, callback_data=action("time", post, data)))
         if len(current) == 3:
             rows.append(current)
@@ -285,7 +290,7 @@ async def calendar(target, post, context, day=None):
         rows.append(current)
 
     rows += [
-        [Button("✍️ Вибрати годину та хвилини", callback_data=action("clock", post, day))],
+        [Button("✍️ Вибрати годину та хвилини", callback_data=action("clock", post, day_str))],
         [Button("← Назад", callback_data=f"show|{post['id']}")],
     ]
     await present(target, text, rows)
