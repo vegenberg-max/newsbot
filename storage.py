@@ -162,6 +162,19 @@ class Store:
         with self.connection() as con:
             return self._get(con, post_id)
 
+    def daily_posts(self, channel_id, start, end, exclude_id):
+        """Отримує список запланованих постів на вибраний день."""
+        with self.connection() as con:
+            rows = con.execute(
+                """SELECT publish_at, text FROM posts
+                WHERE channel_id=? AND publish_at>=? AND publish_at<? AND id<>?
+                AND status IN ('scheduled', 'retry', 'sending')
+                ORDER BY publish_at""",
+                (channel_id, start, end, exclude_id),
+            )
+            return [dict(r) for r in rows]
+
+
     def create(self, owner, payload):
         now = int(time.time())
         post_id = uuid.uuid4().hex
