@@ -1,14 +1,15 @@
 """Durable post state and atomic transitions; no Telegram calls in transactions."""
 
 import json
+import sqlite3  # Стандартна бібліотека Python (для sqlite3.Row)
 import time
 import uuid
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
 
-# Використовуємо libsql_experimental замість стандартного sqlite3
-import libsql_experimental as sqlite3
+# Модуль для підключення до хмарної бази Turso
+import libsql_experimental as libsql
 
 EDITABLE = {"draft", "scheduled", "retry", "failed", "overdue", "needs_review"}
 ACTIVE = tuple(sorted(EDITABLE | {"sending", "uncertain"}))
@@ -35,7 +36,7 @@ class Store:
     def connection(self, write=False):
         # Якщо використовується Turso (URL починається з libsql://)
         if self.db_url.startswith("libsql://"):
-            con = sqlite3.connect(self.db_url, auth_token=self.auth_token)
+            con = libsql.connect(self.db_url, auth_token=self.auth_token)
         else:
             con = sqlite3.connect(self.db_url)
 
@@ -75,7 +76,6 @@ class Store:
             con.execute(
                 "CREATE INDEX IF NOT EXISTS posts_queue ON posts(status, publish_at)"
             )
-            con.execute("PRAGMA user_version=1")
 
     @staticmethod
     def _get(con, post_id):
@@ -167,10 +167,12 @@ class Store:
                     revision=revision+1, updated_at=? WHERE id=?""",
                     (target, now, post_id),
                 )
-            except sqlite3.IntegrityError as exc:
-                raise Occupied(
-                    "В этом канале уже есть пост на эту минуту. Выберите другое время."
-                ) from exc
+            except Exception as exc:
+                if "UNIQUE constraint failed" in str(exc) or "one_post_per_channel_minute" in str(exc):
+                    raise Occupied(
+                        "В этом канале уже есть пост на эту минуту. Выберите другое время."
+                    ) from exc
+                raise exc
             return self._get(con, post_id)
 
     def cancel(self, post_id, revision):
