@@ -111,62 +111,41 @@ def local_time(value, settings):
 async def controls(target, post, context):
     pub = service(context)
     config = pub.settings
-    title = post["text"].replace("\n", " ")[:180] or "Фото/видео без текста"
-    text = f"{title}\n\nСостояние: {LABELS.get(post['status'], post['status'])}"
-    text += f"\nКанал: {config.channels.get(post['channel_id'], 'не выбран')}"
-    if post["publish_at"]:
-        text += f"\nВремя: {local_time(post['publish_at'], config)} ({config.timezone})"
-    if post["status"] == "retry":
-        text += f"\nПовтор: {local_time(post['retry_at'], config)}"
-    if post["last_error"]:
-        text += "\n\n" + post["last_error"][:600]
-    rows = [[Button("👁 Предпросмотр", callback_data=action("view", post))]]
     own = post["owner_id"] == config.admin_id
+    
+    rows = []
+    # Якщо канал ще не обрано — пропонуємо вибір каналу
     if post["status"] == "draft" and post["channel_id"] is None:
         for index, name in enumerate(config.channels.values()):
             rows.append([Button(name, callback_data=action("ch", post, index))])
     elif post["status"] in EDITABLE and own:
         rows += [
-            [Button("🚀 Опубликовать сейчас", callback_data=action("send", post))],
-            [Button("🗓 Выбрать дату и время", callback_data=action("plan", post))],
-        ]
-    if post["status"] in EDITABLE and own:
-        rows.append(
+            [Button("🚀 Опублікувати зараз", callback_data=action("send", post))],
+            [Button("🗓 Вибрати дату і час", callback_data=action("plan", post))],
             [
                 Button("✏️ Текст", callback_data=action("edit", post)),
-                Button("🖼 Фото/видео", callback_data=action("media", post)),
-            ]
-        )
-        if post["text"]:
-            rows.append([Button("Убрать текст", callback_data=action("clear", post))])
-        if post["photo_file_id"] or post["video_file_id"]:
-            rows.append(
-                [Button("Убрать фото/видео", callback_data=action("nomed", post))]
-            )
-    if post["status"] == "uncertain":
-        text += "\n\nСначала откройте канал и проверьте, появился ли пост."
-        rows += [
-            [
-                Button(
-                    "✅ Проверил: пост уже в канале", callback_data=action("done", post)
-                )
-            ],
-            [
-                Button(
-                    "🔁 Поста нет — отправить заново",
-                    callback_data=action("again", post),
-                )
+                Button("🖼 Фото/відео", callback_data=action("media", post)),
             ],
         ]
+        if post["text"]:
+            rows.append([Button("Убрати текст", callback_data=action("clear", post))])
+        if post["photo_file_id"] or post["video_file_id"]:
+            rows.append([Button("Убрати фото/відео", callback_data=action("nomed", post))])
+
     if post["status"] in EDITABLE | {"uncertain"}:
-        rows.append([Button("🗑 Убрать из очереди", callback_data=action("del", post))])
+        rows.append([Button("🗑 Убрати з черги", callback_data=action("del", post))])
     rows.append(
         [
             Button("📋 Очередь", callback_data="list|0"),
             Button("История", callback_data="hist|0"),
         ]
     )
-    await present(target, text, rows)
+
+    markup = Markup(rows)
+    chat_id = target.message.chat_id if isinstance(target, CallbackQuery) else target.chat_id
+
+    # Прикріплюємо кнопки ПРЯМО під постом (без створення окремого статусного тексту зверху)
+    await pub.send_content(chat_id, post, reply_markup=markup)
 
 
 async def listing(target, context, page=0, history=False):
@@ -208,6 +187,7 @@ async def calendar(target, post, context, day=None):
     pub.validate(post)
     tz = ZoneInfo(pub.settings.timezone)
     today = datetime.now(tz).date()
+    
     if day is None:
         selected = today
     else:
@@ -215,44 +195,48 @@ async def calendar(target, post, context, day=None):
             selected = datetime.strptime(day, "%Y-%m-%d").date()
         except ValueError as exc:
             raise ContentError("Введите дату в формате ГГГГ-ММ-ДД.") from exc
+            
     if selected < today or selected > today + timedelta(days=366):
         raise ContentError("Выберите дату от сегодняшнего дня до года вперёд.")
+        
     day = selected.isoformat()
     midnight = datetime.combine(selected, datetime.min.time(), tzinfo=tz)
-    occupied = await db_call(
-        pub.store.occupied,
+    
+    # 1. Отримуємо список запланованих постів на день
+    daily_items = await db_call(
+        pub.store.daily_posts,
         post["channel_id"],
         int(midnight.timestamp()),
         int((midnight + timedelta(days=1)).timestamp()),
         post["id"],
     )
+    occupied = {item["publish_at"] for item in daily_items}
+
+    # 2. Формуємо текст календаря зі списком запланованих постів (як у старій версії)
+    text = f"⏰ Час публікації ({selected.strftime('%d.%m.%Y')})\n\n"
+    if daily_items:
+        text += "Заплановані пости на цей день:\n"
+        for item in daily_items:
+            t_str = datetime.fromtimestamp(item["publish_at"], tz).strftime("%H:%M")
+            title = (item["text"] or "Фото/відео").replace("\n", " ")[:35]
+            text += f"📌 {t_str} — {title}...\n"
+        text += "\n"
+        
+    text += "Оберіть час з меню або введіть його текстом:"
+
+    # 3. Кнопки вибору часу
     rows, nav = [], []
     if selected > today:
-        nav.append(
-            Button(
-                "← День",
-                callback_data=action(
-                    "day", post, (selected - timedelta(days=1)).isoformat()
-                ),
-            )
-        )
+        nav.append(Button("← День", callback_data=action("day", post, (selected - timedelta(days=1)).isoformat())))
     if selected < today + timedelta(days=366):
-        nav.append(
-            Button(
-                "День →",
-                callback_data=action(
-                    "day", post, (selected + timedelta(days=1)).isoformat()
-                ),
-            )
-        )
+        nav.append(Button("День →", callback_data=action("day", post, (selected + timedelta(days=1)).isoformat())))
     if nav:
         rows.append(nav)
+
     current = []
     for value in TIMES:
         try:
-            stamp = parse_local_time(
-                day, value, pub.settings.timezone, int(time.time())
-            )
+            stamp = parse_local_time(day, value, pub.settings.timezone, int(time.time()))
         except ContentError:
             continue
         if stamp in occupied:
@@ -265,17 +249,14 @@ async def calendar(target, post, context, day=None):
             current = []
     if current:
         rows.append(current)
+
     rows += [
         [Button("⌨️ Ввести время", callback_data=action("clock", post, day))],
         [Button("⌨️ Ввести дату", callback_data=action("date", post))],
         [Button("Назад к посту", callback_data=f"show|{post['id']}")],
     ]
-    await present(
-        target,
-        f"Дата: {selected.strftime('%d.%m.%Y')}\nЧасовой пояс: {pub.settings.timezone}\n"
-        f"Канал: {pub.settings.channels[post['channel_id']]}\n\nВыберите время:",
-        rows,
-    )
+    await present(target, text, rows)
+
 
 
 async def start(update, context):
