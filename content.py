@@ -110,14 +110,15 @@ def entities_from_json(value):
 def prepare(post):
     entities = entities_from_json(post["entities_json"])
     text, entities = final_content(post["text"], entities)
-    limit = 1024 if post.get("photo_file_id") or post.get("video_file_id") else 4096
+    
+    # Оскільки ми використовуємо текстове повідомлення з прев'ю, ліміт завжди становить 4096 символів
+    limit = 4096
     if utf16_len(text) > limit:
         raise ContentError(
             f"Текст вместе с подписью длиннее лимита Telegram ({limit}). Сократите текст."
         )
-    if post.get("photo_file_id") and post.get("video_file_id"):
-        raise ContentError("В одном посте должно быть одно фото или одно видео.")
     return text, entities
+
 
 
 def parse_local_time(date_text, time_text, zone, now):
