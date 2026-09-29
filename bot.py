@@ -122,10 +122,7 @@ async def controls(target, post, context):
         for index, name in enumerate(config.channels.values()):
             rows.append([Button(name, callback_data=action("ch", post, index))])
     elif post["status"] in EDITABLE and own:
-        if post["publish_at"]:
-            plan_label = f"🗓 Заплановано: {local_time(post['publish_at'], config)}"
-        else:
-            plan_label = "🗓 Вибрати дату і час"
+        plan_label = "🗓 Змінити дату і час" if post["publish_at"] else "🗓 Вибрати дату і час"
 
         rows += [
             [Button("🚀 Опублікувати зараз", callback_data=action("send", post))],
@@ -242,9 +239,11 @@ async def calendar(target, post, context, day=None):
     next_day = selected + timedelta(days=1)
 
     if selected > today:
-        nav.append(Button(f"← {prev_day.strftime('%d.%m.%Y')}", callback_data=action("day", post, prev_day.isoformat())))
+        prev_label = "⬅️ Сьогодні" if prev_day == today else f"⬅️ {prev_day.strftime('%d.%m')}"
+        nav.append(Button(prev_label, callback_data=action("day", post, prev_day.isoformat())))
     if selected < today + timedelta(days=366):
-        nav.append(Button(f"{next_day.strftime('%d.%m.%Y')} →", callback_data=action("day", post, next_day.isoformat())))
+        next_label = f"Завтра ({next_day.strftime('%d.%m')}) ➡️" if next_day == today + timedelta(days=1) else f"{next_day.strftime('%d.%m.%Y')} ➡️"
+        nav.append(Button(next_label, callback_data=action("day", post, next_day.isoformat())))
     if nav:
         rows.append(nav)
 
@@ -400,7 +399,6 @@ async def receive(update, context):
                     await message.reply_text(
                         f"✅ ⏰ Пост заплановано на {dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
                     )
-                    await controls(message, post, context)
                 context.user_data.pop("await", None)
                 return
             if kind == "edit":
@@ -520,10 +518,11 @@ async def callbacks(update, context):
             
             tz = ZoneInfo(pub.settings.timezone)
             dt = datetime.fromtimestamp(target, tz)
-            await query.message.reply_text(
-                f"✅ ⏰ Пост заплановано на {dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
-            )
-            await controls(query, post, context)
+            text = f"✅ ⏰ Пост заплановано на {dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
+            try:
+                await query.edit_message_text(text)
+            except TelegramError:
+                await query.message.reply_text(text)
         elif name in {"edit", "media", "clock", "date"}:
             if (
                 post["status"] not in EDITABLE
