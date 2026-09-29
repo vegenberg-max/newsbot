@@ -122,7 +122,6 @@ async def controls(target, post, context):
         for index, name in enumerate(config.channels.values()):
             rows.append([Button(name, callback_data=action("ch", post, index))])
     elif post["status"] in EDITABLE and own:
-        # Відображення збереженої дати публікації у кнопці
         if post["publish_at"]:
             plan_label = f"🗓 Заплановано: {local_time(post['publish_at'], config)}"
         else:
@@ -152,26 +151,17 @@ async def controls(target, post, context):
 
     markup = Markup(rows)
 
-    # Редагуємо поточне повідомлення на місці при виборі часу
+    # Видаляємо попереднє повідомлення меню/календаря, щоб send_content
+    # відправив повноцінний предпросмотр з фото, жирним текстом та автопідписом
     if isinstance(target, CallbackQuery):
+        chat_id = target.message.chat_id
         try:
-            if target.message.caption is not None:
-                await target.edit_message_caption(caption=post["text"] or "", reply_markup=markup)
-                return
-            elif target.message.text is not None:
-                display_text = post["text"] or "Фото/відео"
-                await target.edit_message_text(text=display_text, reply_markup=markup)
-                return
-        except BadRequest as exc:
-            detail = str(exc).lower()
-            if "message is not modified" in detail:
-                return
-            try:
-                await target.message.delete()
-            except TelegramError:
-                pass
+            await target.message.delete()
+        except TelegramError:
+            pass
+    else:
+        chat_id = target.chat_id
 
-    chat_id = target.message.chat_id if isinstance(target, CallbackQuery) else target.chat_id
     await pub.send_content(chat_id, post, reply_markup=markup)
 
 
@@ -253,7 +243,6 @@ async def calendar(target, post, context, day=None):
     prev_day = selected - timedelta(days=1)
     next_day = selected + timedelta(days=1)
 
-    # Кнопки тепер прямо показують конкретні дати
     if selected > today:
         nav.append(Button(f"← {prev_day.strftime('%d.%m.%Y')}", callback_data=action("day", post, prev_day.isoformat())))
     if selected < today + timedelta(days=366):
