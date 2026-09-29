@@ -22,7 +22,8 @@ class Settings:
     token: str
     admin_id: int
     channels: dict[int, str]
-    db_path: Path
+    db_url: str
+    db_token: str
     timezone: str = "Europe/Kyiv"
     late_minutes: int = 15
 
@@ -43,11 +44,16 @@ class Settings:
             zone = str(raw.get("timezone", "Europe/Kyiv"))
             ZoneInfo(zone)
             late = int(raw.get("late_minutes", 15))
-            db = Path(os.environ.get("DB_PATH", raw.get("db_path", "posts.db")))
+            
+            # Читаємо URL та токен Turso з змінних оточення (або z settings.json)
+            db_url = os.environ.get("DB_URL", raw.get("db_url", "posts.db")).strip()
+            db_token = os.environ.get("DB_TOKEN", raw.get("db_token", "")).strip()
+
         except (ValueError, TypeError, KeyError, OSError, AttributeError) as exc:
             raise ConfigError(
                 "Проверьте формат settings.json и переменных окружения."
             ) from exc
+
         if not token or token == "YOUR_BOT_TOKEN_HERE" or ":" not in token:
             raise ConfigError(
                 "Укажите токен в settings.json (bot_token) или переменной BOT_TOKEN."
@@ -66,43 +72,18 @@ class Settings:
             )
         if not 0 <= late <= 1440:
             raise ConfigError("late_minutes должен быть от 0 до 1440.")
-        if not db.is_absolute():
-            db = root / db
-        return cls(token, admin, channels, db.resolve(), zone, late)
+
+        return cls(token, admin, channels, db_url, db_token, zone, late)
 
 
 class InstanceLock:
-    """OS-managed lock, automatically released even if the process dies."""
+    """Для хмарної бази Turso локальне блокування файлу не потрібне."""
 
-    def __init__(self, database: Path):
-        self.path = database.with_name(database.name + ".lock")
-        self.file = None
+    def __init__(self, database=None):
+        pass
 
     def acquire(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.file = self.path.open("a+b")
-        self.file.seek(0, 2)
-        if self.file.tell() == 0:
-            self.file.write(b"0")
-            self.file.flush()
-        self.file.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            self.file.close()
-            self.file = None
-            raise ConfigError(
-                "С этой базой уже работает другой экземпляр бота. Сначала остановите его."
-            ) from exc
+        pass
 
     def close(self):
-        if self.file is not None:
-            self.file.close()
-            self.file = None
+        pass
