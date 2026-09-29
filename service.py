@@ -74,7 +74,7 @@ class Publisher:
             raise ContentError("Сначала выберите разрешённый канал.")
         return prepare(post)
 
-    async def send_content(self, chat_id, post):
+    async def send_content(self, chat_id, post, reply_markup=None):
         text, entities = prepare(post)
         if post.get("photo_file_id"):
             return await self.bot.send_photo(
@@ -82,6 +82,7 @@ class Publisher:
                 photo=post["photo_file_id"],
                 caption=text,
                 caption_entities=entities,
+                reply_markup=reply_markup,
             )
         if post.get("video_file_id"):
             return await self.bot.send_video(
@@ -89,11 +90,13 @@ class Publisher:
                 video=post["video_file_id"],
                 caption=text,
                 caption_entities=entities,
+                reply_markup=reply_markup,
             )
         return await self.bot.send_message(
             chat_id,
             text=text,
             entities=entities,
+            reply_markup=reply_markup,
             link_preview_options=LinkPreviewOptions(
                 is_disabled=not bool(post.get("preview_url")),
                 url=post.get("preview_url"),
