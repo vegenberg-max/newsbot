@@ -151,8 +151,6 @@ async def controls(target, post, context):
 
     markup = Markup(rows)
 
-    # Видаляємо попереднє повідомлення меню/календаря, щоб send_content
-    # відправив повноцінний предпросмотр з фото, жирним текстом та автопідписом
     if isinstance(target, CallbackQuery):
         chat_id = target.message.chat_id
         try:
@@ -397,6 +395,11 @@ async def receive(update, context):
                         target,
                         int(time.time()),
                     )
+                    tz = ZoneInfo(pub.settings.timezone)
+                    dt = datetime.fromtimestamp(target, tz)
+                    await message.reply_text(
+                        f"✅ ⏰ Пост заплановано на {dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
+                    )
                     await controls(message, post, context)
                 context.user_data.pop("await", None)
                 return
@@ -514,11 +517,12 @@ async def callbacks(update, context):
             post = await db_call(
                 pub.store.schedule, post["id"], revision, target, int(time.time())
             )
-            formatted_time = local_time(target, pub.settings)
-            try:
-                await query.answer(f"✅ Час встановлено: {formatted_time}", show_alert=True)
-            except TelegramError:
-                pass
+            
+            tz = ZoneInfo(pub.settings.timezone)
+            dt = datetime.fromtimestamp(target, tz)
+            await query.message.reply_text(
+                f"✅ ⏰ Пост заплановано на {dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
+            )
             await controls(query, post, context)
         elif name in {"edit", "media", "clock", "date"}:
             if (
