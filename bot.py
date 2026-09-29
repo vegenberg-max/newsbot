@@ -277,7 +277,7 @@ async def calendar(target, post, context, day=None):
         except ContentError:
             continue
         if stamp in occupied:
-            current.append(Button("Зайнято " + value, callback_data="busy"))
+            continue
         else:
             data = day_str.replace("-", "") + value.replace(":", "")
             current.append(Button(value, callback_data=action("time", post, data)))
