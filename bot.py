@@ -50,6 +50,17 @@ TIMES = (
     "22:00",
 )
 
+DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
+MONTHS_UA = [
+    "верес", "жовт", "лист", "груд",
+    "січ", "лют", "берез", "квіт", "трав", "черв", "лип", "серп"
+]
+
+def format_date_ua(dt):
+    # Українські місяці за номерами (1 = січ, 9 = верес і т.д.)
+    months = ["січ", "лют", "берез", "квіт", "трав", "черв", "лип", "серп", "верес", "жовт", "лист", "груд"]
+    return f"{DAYS_UA[dt.weekday()]}, {dt.day} {months[dt.month - 1]}"
+
 
 def service(context):
     return context.application.bot_data["publisher"]
@@ -223,29 +234,38 @@ async def calendar(target, post, context, day=None):
     )
     occupied = {item["publish_at"] for item in daily_items}
 
-    text = f"⏰ Час публікації ({selected.strftime('%d.%m.%Y')})\n\n"
+    date_ua = format_date_ua(selected)
+
+    text = "⏰ Час публікації\n\n"
     if daily_items:
-        text += "Заплановані пости на цей день:\n"
+        text += f"Заплановані пости на {date_ua}:\n"
         for item in daily_items:
             t_str = datetime.fromtimestamp(item["publish_at"], tz).strftime("%H:%M")
             title = (item["text"] or "Фото/відео").replace("\n", " ")[:35]
-            text += f"📌 {t_str} — {title}...\n"
+            text += f"📍 {t_str} — {title}...\n"
         text += "\n"
         
-    text += "Оберіть час з меню або введіть його текстом:"
+    text += "Оберіть час з меню або надішліть його текстом:"
 
-    rows, nav = [], []
+    rows = []
+    nav = []
     prev_day = selected - timedelta(days=1)
     next_day = selected + timedelta(days=1)
 
+    # Ліва стрілка
     if selected > today:
-        prev_label = "⬅️ Сьогодні" if prev_day == today else f"⬅️ {prev_day.strftime('%d.%m')}"
-        nav.append(Button(prev_label, callback_data=action("day", post, prev_day.isoformat())))
+        nav.append(Button("←", callback_data=action("day", post, prev_day.isoformat())))
+    else:
+        nav.append(Button(" ", callback_data="busy"))
+
+    # Кнопка дати по центру
+    nav.append(Button(f"🗓 {date_ua}", callback_data="busy"))
+
+    # Права стрілка
     if selected < today + timedelta(days=366):
-        next_label = f"Завтра ({next_day.strftime('%d.%m')}) ➡️" if next_day == today + timedelta(days=1) else f"{next_day.strftime('%d.%m.%Y')} ➡️"
-        nav.append(Button(next_label, callback_data=action("day", post, next_day.isoformat())))
-    if nav:
-        rows.append(nav)
+        nav.append(Button("→", callback_data=action("day", post, next_day.isoformat())))
+
+    rows.append(nav)
 
     current = []
     for value in TIMES:
@@ -265,9 +285,8 @@ async def calendar(target, post, context, day=None):
         rows.append(current)
 
     rows += [
-        [Button("⌨️ Ввести час", callback_data=action("clock", post, day))],
-        [Button("⌨️ Ввести дату", callback_data=action("date", post))],
-        [Button("⬅️ Назад до поста", callback_data=f"show|{post['id']}")],
+        [Button("✍️ Вибрати годину та хвилини", callback_data=action("clock", post, day))],
+        [Button("← Назад", callback_data=f"show|{post['id']}")],
     ]
     await present(target, text, rows)
 
@@ -326,7 +345,6 @@ def payload(message):
     entities = message.entities or message.caption_entities or []
     urls = extract_urls(text, entities)
     
-    # Ігноруємо посилання на Telegram-канали/чати при пошуку фото-прев'ю, якщо є інші сайти
     external_urls = [
         u for u in urls 
         if not any(domain in u.lower() for domain in ("t.me", "telegram.me", "telegram.dog"))
@@ -418,10 +436,7 @@ async def receive(update, context):
                         "Надішліть новий текст. Для видалення тексту скористайтеся кнопкою «Видалити текст»."
                     )
                 new = payload(message)
-                
-                # Зберігаємо існуюче прев'ю оригінальної новини
                 preview_url = post.get("preview_url") or new["preview_url"]
-                
                 changes = {
                     "text": new["text"],
                     "entities_json": new["entities_json"],
@@ -560,8 +575,8 @@ async def callbacks(update, context):
             prompts = {
                 "edit": "Надішліть новий текст.",
                 "media": "Надішліть нове фото або відео.",
-                "clock": "Введіть час, наприклад 09:25.",
-                "date": "Введіть дату, наприклад 2026-12-15 (РРРР-ММ-ДД).",
+                "clock": "✍️ Надішліть час для публікації текстом (наприклад: 09:25 або 18:40):",
+                "date": "Введіть дату у форматі РРРР-ММ-ДД (наприклад: 2026-09-30):",
             }
             await query.message.reply_text(prompts[name] + "\n/cancel — скасувати введення.")
         elif name in {"clear", "nomed"}:
