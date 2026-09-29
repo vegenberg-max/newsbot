@@ -1,12 +1,14 @@
 """Durable post state and atomic transitions; no Telegram calls in transactions."""
 
 import json
-import sqlite3
 import time
 import uuid
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
+
+# Використовуємо libsql_experimental замість стандартного sqlite3
+import libsql_experimental as sqlite3
 
 EDITABLE = {"draft", "scheduled", "retry", "failed", "overdue", "needs_review"}
 ACTIVE = tuple(sorted(EDITABLE | {"sending", "uncertain"}))
@@ -25,12 +27,18 @@ class Occupied(StoreError):
 
 
 class Store:
-    def __init__(self, path):
-        self.path = Path(path)
+    def __init__(self, db_url, auth_token=""):
+        self.db_url = str(db_url)
+        self.auth_token = str(auth_token)
 
     @contextmanager
     def connection(self, write=False):
-        con = sqlite3.connect(self.path, timeout=10)
+        # Якщо використовується Turso (URL починається з libsql://)
+        if self.db_url.startswith("libsql://"):
+            con = sqlite3.connect(self.db_url, auth_token=self.auth_token)
+        else:
+            con = sqlite3.connect(self.db_url)
+
         con.row_factory = sqlite3.Row
         try:
             if write:
@@ -45,27 +53,6 @@ class Store:
             con.close()
 
     def initialize(self, admin_id, channels, zone):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connection() as con:
-            version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
-                raise StoreError(
-                    "База создана более новой версией бота. Не запускайте старую версию."
-                )
-            tables = {
-                r[0]
-                for r in con.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            migrate = "scheduled_posts" in tables and "bot_meta" not in tables
-            if migrate:
-                name = self.path.with_name(
-                    self.path.name + ".before-upgrade-" + uuid.uuid4().hex[:8] + ".bak"
-                )
-                with closing(sqlite3.connect(name)) as backup:
-                    con.backup(backup)
-            con.execute("PRAGMA journal_mode=WAL")
         with self.connection(write=True) as con:
             con.execute(
                 "CREATE TABLE IF NOT EXISTS bot_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -88,60 +75,6 @@ class Store:
             con.execute(
                 "CREATE INDEX IF NOT EXISTS posts_queue ON posts(status, publish_at)"
             )
-            if migrate:
-                rows = [dict(r) for r in con.execute("SELECT * FROM scheduled_posts")]
-                for old in rows:
-                    now = int(time.time())
-                    error = None
-                    target = None
-                    try:
-                        dt = datetime.fromisoformat(old.get("publish_time") or "")
-                        if dt.tzinfo is None:
-                            raise ValueError("missing timezone")
-                        target = int(dt.timestamp())
-                        if target % 60:
-                            raise ValueError("not an exact minute")
-                    except (ValueError, TypeError):
-                        error = "Проверьте дату импортированного поста и назначьте время заново."
-                    owner = old.get("user_id") or admin_id
-                    if owner != admin_id or old.get("channel_id") not in channels:
-                        error = "В старом посте другой автор или неизвестный канал. Создайте новый пост после проверки."
-                    state = "needs_review" if error else "scheduled"
-                    payload = (
-                        uuid.uuid4().hex,
-                        owner,
-                        old.get("channel_id"),
-                        old.get("text") or "",
-                        old.get("entities_json") or "[]",
-                        old.get("preview_url"),
-                        old.get("photo_file_id"),
-                        old.get("video_file_id"),
-                        state,
-                        target,
-                        error,
-                        now,
-                        now,
-                        1 if error else 0,
-                        str(old.get("post_id", "")),
-                    )
-                    sql = """INSERT INTO posts (id, owner_id, channel_id, text, entities_json,
-                        preview_url, photo_file_id, video_file_id, status, publish_at, last_error,
-                        created_at, updated_at, notification_pending, legacy_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-                    try:
-                        con.execute(sql, payload)
-                    except sqlite3.IntegrityError:
-                        adjusted = list(payload)
-                        adjusted[8] = "needs_review"
-                        adjusted[10] = (
-                            "В старой очереди два поста на одно время. Выберите новое время."
-                        )
-                        adjusted[13] = 1
-                        con.execute(sql, adjusted)
-                con.execute(
-                    "INSERT INTO bot_meta VALUES ('legacy_imported', ?)",
-                    (str(len(rows)),),
-                )
             con.execute("PRAGMA user_version=1")
 
     @staticmethod
@@ -173,7 +106,6 @@ class Store:
                 (channel_id, start, end, exclude_id),
             )
             return [dict(r) for r in rows]
-
 
     def create(self, owner, payload):
         now = int(time.time())
