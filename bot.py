@@ -77,9 +77,12 @@ def action(name, post, extra=None):
 async def present(target, text, keyboard=None):
     markup = Markup(keyboard) if keyboard is not None else None
     if isinstance(target, CallbackQuery):
-        if target.message and target.message.text:
+        if target.message:
             try:
-                await target.edit_message_text(text, reply_markup=markup)
+                if target.message.caption is not None:
+                    await target.message.edit_caption(caption=text, reply_markup=markup)
+                else:
+                    await target.message.edit_text(text, reply_markup=markup)
                 return
             except BadRequest as exc:
                 detail = str(exc).lower()
@@ -93,7 +96,7 @@ async def present(target, text, keyboard=None):
                         "message can not be edited",
                     )
                 ):
-                    raise
+                    pass
         if target.message:
             await target.message.reply_text(text, reply_markup=markup)
     else:
@@ -102,7 +105,7 @@ async def present(target, text, keyboard=None):
 
 def local_time(value, settings):
     if value is None:
-        return "не задано"
+        return "не вказано"
     return datetime.fromtimestamp(value, ZoneInfo(settings.timezone)).strftime(
         "%d.%m.%Y %H:%M"
     )
@@ -128,34 +131,43 @@ async def controls(target, post, context):
             ],
         ]
         if post["text"]:
-            rows.append([Button("Убрати текст", callback_data=action("clear", post))])
+            rows.append([Button("🗑 Видалити текст", callback_data=action("clear", post))])
         if post["photo_file_id"] or post["video_file_id"]:
-            rows.append([Button("Убрати фото/відео", callback_data=action("nomed", post))])
+            rows.append([Button("🗑 Видалити фото/відео", callback_data=action("nomed", post))])
 
     if post["status"] in EDITABLE | {"uncertain"}:
-        rows.append([Button("🗑 Убрати з черги", callback_data=action("del", post))])
+        rows.append([Button("🗑 Видалити з черги", callback_data=action("del", post))])
     rows.append(
         [
-            Button("📋 Очередь", callback_data="list|0"),
-            Button("История", callback_data="hist|0"),
+            Button("📋 Черга", callback_data="list|0"),
+            Button("📜 Історія", callback_data="hist|0"),
         ]
     )
 
     markup = Markup(rows)
-    chat_id = target.message.chat_id if isinstance(target, CallbackQuery) else target.chat_id
 
-    # Прикріплюємо кнопки ПРЯМО під постом (без створення окремого статусного тексту зверху)
+    # Якщо викликано з CallbackQuery (кліку по кнопці) — видаляємо старе повідомлення календаря/меню, 
+    # щоб прикріпити чистий предпросмотр з кнопками знизу
+    if isinstance(target, CallbackQuery):
+        try:
+            await target.message.delete()
+        except TelegramError:
+            pass
+        chat_id = target.message.chat_id
+    else:
+        chat_id = target.chat_id
+
     await pub.send_content(chat_id, post, reply_markup=markup)
 
 
 async def listing(target, context, page=0, history=False):
     pub = service(context)
     posts, total, page = await db_call(pub.store.page, page, history)
-    text = ("История" if history else "Очередь и черновики") + f" · всего {total}\n"
+    text = ("📜 Історія" if history else "📋 Черга та чернетки") + f" · всього {total}\n"
     rows = []
     for item in posts:
-        title = item["text"].replace("\n", " ")[:50] or "Фото/видео"
-        channel = pub.settings.channels.get(item["channel_id"], "Канал не выбран")
+        title = item["text"].replace("\n", " ")[:50] or "Фото/відео"
+        channel = pub.settings.channels.get(item["channel_id"], "Канал не обрано")
         text += f"\n{title}\n{channel} · {LABELS.get(item['status'], item['status'])}"
         if item["publish_at"]:
             text += " · " + local_time(item["publish_at"], pub.settings)
@@ -172,13 +184,13 @@ async def listing(target, context, page=0, history=False):
     rows.append(
         [
             Button(
-                "Очередь" if history else "История",
+                "📋 Черга" if history else "📜 Історія",
                 callback_data="list|0" if history else "hist|0",
             )
         ]
     )
     if not total:
-        text += "\nЗдесь пока пусто. Отправьте боту текст, одно фото или одно видео."
+        text += "\nТут поки порожньо. Надішліть боту текст, одне фото або одне відео."
     await present(target, text, rows)
 
 
@@ -194,15 +206,14 @@ async def calendar(target, post, context, day=None):
         try:
             selected = datetime.strptime(day, "%Y-%m-%d").date()
         except ValueError as exc:
-            raise ContentError("Введите дату в формате ГГГГ-ММ-ДД.") from exc
+            raise ContentError("Введіть дату у форматі РРРР-ММ-ДД.") from exc
             
     if selected < today or selected > today + timedelta(days=366):
-        raise ContentError("Выберите дату от сегодняшнего дня до года вперёд.")
+        raise ContentError("Оберіть дату від сьогоднішнього дня до року вперед.")
         
     day = selected.isoformat()
     midnight = datetime.combine(selected, datetime.min.time(), tzinfo=tz)
     
-    # 1. Отримуємо список запланованих постів на день
     daily_items = await db_call(
         pub.store.daily_posts,
         post["channel_id"],
@@ -212,7 +223,6 @@ async def calendar(target, post, context, day=None):
     )
     occupied = {item["publish_at"] for item in daily_items}
 
-    # 2. Формуємо текст календаря зі списком запланованих постів (як у старій версії)
     text = f"⏰ Час публікації ({selected.strftime('%d.%m.%Y')})\n\n"
     if daily_items:
         text += "Заплановані пости на цей день:\n"
@@ -224,7 +234,6 @@ async def calendar(target, post, context, day=None):
         
     text += "Оберіть час з меню або введіть його текстом:"
 
-    # 3. Кнопки вибору часу
     rows, nav = [], []
     if selected > today:
         nav.append(Button("← День", callback_data=action("day", post, (selected - timedelta(days=1)).isoformat())))
@@ -240,7 +249,7 @@ async def calendar(target, post, context, day=None):
         except ContentError:
             continue
         if stamp in occupied:
-            current.append(Button("Занято " + value, callback_data="busy"))
+            current.append(Button("Зайнято " + value, callback_data="busy"))
         else:
             data = day.replace("-", "") + value.replace(":", "")
             current.append(Button(value, callback_data=action("time", post, data)))
@@ -251,27 +260,26 @@ async def calendar(target, post, context, day=None):
         rows.append(current)
 
     rows += [
-        [Button("⌨️ Ввести время", callback_data=action("clock", post, day))],
+        [Button("⌨️ Ввести час", callback_data=action("clock", post, day))],
         [Button("⌨️ Ввести дату", callback_data=action("date", post))],
-        [Button("Назад к посту", callback_data=f"show|{post['id']}")],
+        [Button("⬅️ Назад до поста", callback_data=f"show|{post['id']}")],
     ]
     await present(target, text, rows)
-
 
 
 async def start(update, context):
     if not authorized(update, context):
         if update.effective_chat and update.effective_chat.type == "private":
             await update.effective_message.reply_text(
-                f"Доступ только у администратора. Ваш Telegram ID: {update.effective_user.id}"
+                f"Доступ лише в адміністратора. Ваш Telegram ID: {update.effective_user.id}"
             )
         return
     context.user_data.pop("await", None)
     await update.effective_message.reply_text(
-        "Отправьте текст, одно фото или одно видео. Я сохраню черновик и предложу канал.\n\n"
-        "/scheduled — очередь и черновики\n/history — опубликованные и отменённые\n"
-        "/cancel — отменить текущий ввод\n/id — ваш Telegram ID\n\n"
-        "Перед отправкой проверьте предпросмотр. Время указано по часовому поясу "
+        "Надішліть текст, одне фото або одне відео. Я збережу чернетку і запропоную канал.\n\n"
+        "/scheduled — черга та чернетки\n/history — опубліковані та скасовані\n"
+        "/cancel — скасувати поточне введення\n/id — ваш Telegram ID\n\n"
+        "Перед відправкою перевірте попередній перегляд. Час вказано за часовим поясом "
         + service(context).settings.timezone
         + "."
     )
@@ -304,7 +312,7 @@ async def cancel_input(update, context):
     if authorized(update, context):
         context.user_data.pop("await", None)
         await update.effective_message.reply_text(
-            "Ввод отменён. Посты сохранены. Открыть очередь: /scheduled."
+            "Введення скасовано. Пости збережено. Відкрити чергу: /scheduled."
         )
 
 
@@ -341,14 +349,14 @@ async def receive(update, context):
             groups.append(message.media_group_id)
             del groups[:-50]
             await message.reply_text(
-                "Это альбом из нескольких файлов. Отправьте нужное фото или видео отдельно: альбом целиком пока не поддерживается. Ничего из альбома не поставлено в очередь."
+                "Це альбом з кількох файлів. Надішліть потрібне фото або відео окремо: альбом цілком поки не підтримується. Нічого з альбому не поставлено в чергу."
             )
         return
     pending = context.user_data.get("await")
     if pending and pending["expires"] < time.time():
         context.user_data.pop("await", None)
         await message.reply_text(
-            "Время ввода истекло. Откройте пост через /scheduled и выберите действие ещё раз."
+            "Час введення вичерпано. Відкрийте пост через /scheduled і оберіть дію ще раз."
         )
         return
     try:
@@ -359,11 +367,11 @@ async def receive(update, context):
                 or post["status"] not in EDITABLE
             ):
                 context.user_data.pop("await", None)
-                raise Conflict("Пост изменился. Откройте его заново через /scheduled.")
+                raise Conflict("Пост змінився. Відкрийте його заново через /scheduled.")
             kind = pending["kind"]
             if kind in {"clock", "date"}:
                 if not message.text:
-                    raise ContentError("Отправьте дату или время обычным текстом.")
+                    raise ContentError("Надішліть дату або час звичайним текстом.")
                 if kind == "date":
                     await calendar(message, post, context, message.text.strip())
                 else:
@@ -387,7 +395,7 @@ async def receive(update, context):
             if kind == "edit":
                 if not message.text:
                     raise ContentError(
-                        "Пришлите новый текст. Для удаления текста есть кнопка «Убрать текст»."
+                        "Надішліть новий текст. Для видалення тексту скористайтеся кнопкою «Видалити текст»."
                     )
                 new = payload(message)
                 changes = {
@@ -395,7 +403,7 @@ async def receive(update, context):
                 }
             elif kind == "media":
                 if not message.photo and not message.video:
-                    raise ContentError("Пришлите одно фото или одно видео.")
+                    raise ContentError("Надішліть одне фото або одне відео.")
                 changes = {
                     "photo_file_id": message.photo[-1].file_id
                     if message.photo
@@ -403,20 +411,20 @@ async def receive(update, context):
                     "video_file_id": message.video.file_id if message.video else None,
                 }
             else:
-                raise ContentError("Откройте пост заново через /scheduled.")
+                raise ContentError("Відкрийте пост заново через /scheduled.")
             prepare({**post, **changes})
             post = await db_call(pub.store.edit, post["id"], post["revision"], changes)
             context.user_data.pop("await", None)
             await controls(message, post, context)
             return
         if not (message.text or message.photo or message.video):
-            raise ContentError("Поддерживаются текст, одно фото или одно видео.")
+            raise ContentError("Підтримуються текст, одне фото або одне відео.")
         new = payload(message)
         prepare(new)
         post = await db_call(pub.store.create, pub.settings.admin_id, new)
         await controls(message, post, context)
     except (ContentError, StoreError) as exc:
-        await message.reply_text(str(exc) + "\n/cancel — отменить ввод.")
+        await message.reply_text(str(exc) + "\n/cancel — скасувати введення.")
 
 
 async def callbacks(update, context):
@@ -425,16 +433,15 @@ async def callbacks(update, context):
         return
     if not authorized(update, context):
         try:
-            await query.answer("Нет доступа.", show_alert=True)
+            await query.answer("Немає доступу.", show_alert=True)
         except TelegramError:
             pass
         return
     try:
         await query.answer(
-            "Эта минута занята в выбранном канале." if query.data == "busy" else None
+            "Ця хвилина зайнята у вибраному каналі." if query.data == "busy" else None
         )
     except TelegramError:
-        # Expired UI acknowledgements must not affect publication state.
         logger.info("Could not acknowledge callback")
     context.user_data.pop("await", None)
     pub = service(context)
@@ -450,12 +457,12 @@ async def callbacks(update, context):
             await controls(query, await db_call(pub.store.get, parts[1]), context)
             return
         if len(parts) not in {3, 4}:
-            raise ContentError("Это меню старой версии. Откройте /scheduled.")
+            raise ContentError("Це меню старої версії. Відкрийте /scheduled.")
         post = await db_call(pub.store.get, parts[1])
         revision = int(parts[2])
         if post["revision"] != revision:
             raise Conflict(
-                "Это старое меню. Откройте актуальный пост через /scheduled."
+                "Це старе меню. Відкрийте актуальний пост через /scheduled."
             )
         if name == "view":
             await pub.send_content(pub.settings.admin_id, post)
@@ -463,17 +470,11 @@ async def callbacks(update, context):
             index = int(parts[3])
             channels = list(pub.settings.channels)
             if not 0 <= index < len(channels):
-                raise ContentError("Канал не найден.")
+                raise ContentError("Канал не знайдено.")
             post = await db_call(
                 pub.store.edit, post["id"], revision, {"channel_id": channels[index]}
             )
             await controls(query, post, context)
-            try:
-                await pub.send_content(pub.settings.admin_id, post)
-            except TelegramError:
-                await query.message.reply_text(
-                    "Канал сохранён. Предпросмотр сейчас недоступен; откройте его кнопкой позже."
-                )
         elif name in {"send", "yesag"}:
             post = await pub.publish(
                 post["id"], revision, allow_uncertain=name == "yesag"
@@ -481,7 +482,7 @@ async def callbacks(update, context):
             await controls(query, post, context)
         elif name in {"plan", "day"}:
             if post["status"] not in EDITABLE:
-                raise Conflict("Этот пост сейчас нельзя перенести.")
+                raise Conflict("Цей пост зараз не можна перенести.")
             await calendar(
                 query,
                 post,
@@ -492,7 +493,7 @@ async def callbacks(update, context):
             value = parts[3]
             if len(value) != 12 or not value.isdigit():
                 raise ContentError(
-                    "Повреждена кнопка времени. Откройте календарь заново."
+                    "Пошкоджено кнопку часу. Відкрийте календар заново."
                 )
             day = f"{value[:4]}-{value[4:6]}-{value[6:8]}"
             target = parse_local_time(
@@ -511,11 +512,11 @@ async def callbacks(update, context):
                 post["status"] not in EDITABLE
                 or post["owner_id"] != pub.settings.admin_id
             ):
-                raise Conflict("Этот пост сейчас нельзя редактировать.")
+                raise Conflict("Цей пост зараз не можна редагувати.")
             if name in {"clock", "date"}:
                 pub.validate(post)
             if name == "clock" and len(parts) != 4:
-                raise ContentError("Откройте календарь заново.")
+                raise ContentError("Відкрийте календар заново.")
             context.user_data["await"] = {
                 "kind": name,
                 "id": post["id"],
@@ -524,12 +525,12 @@ async def callbacks(update, context):
                 "expires": time.time() + 900,
             }
             prompts = {
-                "edit": "Пришлите новый текст.",
-                "media": "Пришлите новое фото или видео.",
-                "clock": "Введите время, например 09:25.",
-                "date": "Введите дату, например 2026-12-15 (ГГГГ-ММ-ДД).",
+                "edit": "Надішліть новий текст.",
+                "media": "Надішліть нове фото або відео.",
+                "clock": "Введіть час, наприклад 09:25.",
+                "date": "Введіть дату, наприклад 2026-12-15 (РРРР-ММ-ДД).",
             }
-            await query.message.reply_text(prompts[name] + "\n/cancel — отменить ввод.")
+            await query.message.reply_text(prompts[name] + "\n/cancel — скасувати введення.")
         elif name in {"clear", "nomed"}:
             changes = (
                 {"text": "", "entities_json": "[]", "preview_url": None}
@@ -545,9 +546,9 @@ async def callbacks(update, context):
         elif name == "del":
             await present(
                 query,
-                "Убрать этот пост из очереди? Сообщения, уже появившиеся в канале, останутся там.",
+                "Видалити цей пост з черги? Повідомлення, які вже з'явилися в каналі, залишаться там.",
                 [
-                    [Button("Да, убрать", callback_data=action("yesdel", post))],
+                    [Button("Так, видалити", callback_data=action("yesdel", post))],
                     [Button("Назад", callback_data=f"show|{post['id']}")],
                 ],
             )
@@ -563,14 +564,14 @@ async def callbacks(update, context):
             )
         elif name == "again":
             if post["status"] != "uncertain":
-                raise Conflict("Откройте пост заново.")
+                raise Conflict("Відкрийте пост заново.")
             await present(
                 query,
-                "Отправить ещё раз? Нажимайте только если проверили канал и поста там нет.",
+                "Надіслати ще раз? Натискайте лише якщо перевірили канал і поста там немає.",
                 [
                     [
                         Button(
-                            "Проверил: поста нет, отправить",
+                            "Перевірив: поста немає, надіслати",
                             callback_data=action("yesag", post),
                         )
                     ],
@@ -578,12 +579,12 @@ async def callbacks(update, context):
                 ],
             )
         else:
-            raise ContentError("Кнопка устарела. Откройте /scheduled.")
+            raise ContentError("Кнопка застаріла. Відкрийте /scheduled.")
     except (ContentError, StoreError) as exc:
         await query.message.reply_text(str(exc))
     except (ValueError, IndexError):
         await query.message.reply_text(
-            "Не удалось прочитать кнопку. Откройте /scheduled заново."
+            "Не вдалося прочитати кнопку. Відкрийте /scheduled заново."
         )
 
 
@@ -599,7 +600,7 @@ async def error_handler(update, context):
     ):
         try:
             await update.effective_message.reply_text(
-                "Не удалось завершить действие или обновить меню. Откройте /scheduled и проверьте состояние поста перед повтором."
+                "Не вдалося завершити дію або оновити меню. Відкрийте /scheduled і перевірте стан поста перед повтором."
             )
         except TelegramError:
             pass
@@ -608,7 +609,7 @@ async def error_handler(update, context):
 async def unknown_command(update, context):
     if authorized(update, context):
         await update.effective_message.reply_text(
-            "Неизвестная команда. Помощь: /start."
+            "Невідома команда. Допомога: /start."
         )
 
 
@@ -624,7 +625,7 @@ async def post_init(application):
     try:
         await application.bot.send_message(
             pub.settings.admin_id,
-            "Бот запущен. Черновики и очередь: /scheduled. Если бот ещё не общался с вами, нажмите /start.",
+            "Бот запущено. Чернетки та черга: /scheduled. Якщо бот ще не спілкувався з вами, натисніть /start.",
         )
     except TelegramError:
         logger.warning(
@@ -691,12 +692,12 @@ def main():
             allowed_updates=["message", "callback_query"], drop_pending_updates=False
         )
     except (ConfigError, StoreError) as exc:
-        print(f"Бот не запущен: {exc}")
+        print(f"Бот не запущено: {exc}")
         raise SystemExit(1) from exc
     except Exception:
         logger.exception("Bot stopped because of an error")
         print(
-            "Бот остановлен. Проверьте настройки, доступ к базе и сообщение об ошибке выше."
+            "Бот зупинено. Перевірте налаштування, доступ до бази та повідомлення про помилку вище."
         )
         raise SystemExit(1) from None
     finally:
