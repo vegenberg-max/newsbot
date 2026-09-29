@@ -1,7 +1,7 @@
 """Durable post state and atomic transitions; no Telegram calls in transactions."""
 
 import json
-import sqlite3  # Стандартна бібліотека Python (для sqlite3.Row)
+import sqlite3
 import time
 import uuid
 from contextlib import closing, contextmanager
@@ -34,13 +34,12 @@ class Store:
 
     @contextmanager
     def connection(self, write=False):
-        # Якщо використовується Turso (URL починається з libsql://)
         if self.db_url.startswith("libsql://"):
             con = libsql.connect(self.db_url, auth_token=self.auth_token)
         else:
             con = sqlite3.connect(self.db_url)
+            con.row_factory = sqlite3.Row
 
-        con.row_factory = sqlite3.Row
         try:
             if write:
                 con.execute("BEGIN IMMEDIATE")
@@ -52,6 +51,32 @@ class Store:
             raise
         finally:
             con.close()
+
+    @staticmethod
+    def _fetch_one(con, sql, params=()):
+        cur = con.execute(sql, params)
+        row = cur.fetchone()
+        if row is None:
+            return None
+        if isinstance(row, sqlite3.Row):
+            return dict(row)
+        if cur.description:
+            cols = [d[0] for d in cur.description]
+            return dict(zip(cols, row))
+        return row
+
+    @staticmethod
+    def _fetch_all(con, sql, params=()):
+        cur = con.execute(sql, params)
+        rows = cur.fetchall()
+        if not rows:
+            return []
+        if isinstance(rows[0], sqlite3.Row):
+            return [dict(r) for r in rows]
+        if cur.description:
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+        return [dict(r) for r in rows]
 
     def initialize(self, admin_id, channels, zone):
         with self.connection(write=True) as con:
@@ -77,12 +102,11 @@ class Store:
                 "CREATE INDEX IF NOT EXISTS posts_queue ON posts(status, publish_at)"
             )
 
-    @staticmethod
-    def _get(con, post_id):
-        row = con.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+    def _get(self, con, post_id):
+        row = self._fetch_one(con, "SELECT * FROM posts WHERE id = ?", (post_id,))
         if row is None:
             raise StoreError("Пост не найден. Откройте /scheduled.")
-        return dict(row)
+        return row
 
     @staticmethod
     def _check(post, revision, states):
@@ -98,14 +122,14 @@ class Store:
     def daily_posts(self, channel_id, start, end, exclude_id):
         """Отримує список запланованих постів на вибраний день."""
         with self.connection() as con:
-            rows = con.execute(
+            return self._fetch_all(
+                con,
                 """SELECT publish_at, text FROM posts
                 WHERE channel_id=? AND publish_at>=? AND publish_at<? AND id<>?
                 AND status IN ('scheduled', 'retry', 'sending')
                 ORDER BY publish_at""",
                 (channel_id, start, end, exclude_id),
             )
-            return [dict(r) for r in rows]
 
     def create(self, owner, payload):
         now = int(time.time())
@@ -241,7 +265,7 @@ class Store:
                     token,
                 ),
             )
-            if result.rowcount != 1:
+            if getattr(result, "rowcount", 1) == 0:
                 raise Conflict("Результат отправки не удалось сопоставить с постом.")
             return self._get(con, post_id)
 
@@ -277,15 +301,13 @@ class Store:
 
     def due(self, now, limit=10):
         with self.connection() as con:
-            return [
-                dict(r)
-                for r in con.execute(
-                    """SELECT * FROM posts WHERE
+            return self._fetch_all(
+                con,
+                """SELECT * FROM posts WHERE
                 (status='scheduled' AND publish_at<=?) OR (status='retry' AND retry_at<=?)
                 ORDER BY COALESCE(retry_at, publish_at), created_at LIMIT ?""",
-                    (now, now, limit),
-                )
-            ]
+                (now, now, limit),
+            )
 
     def page(self, page=0, history=False, size=8):
         predicate = (
@@ -294,40 +316,37 @@ class Store:
             else "status NOT IN ('published', 'cancelled')"
         )
         with self.connection() as con:
-            total = con.execute(
-                f"SELECT COUNT(*) FROM posts WHERE {predicate}"
-            ).fetchone()[0]
+            row = con.execute(f"SELECT COUNT(*) FROM posts WHERE {predicate}").fetchone()
+            total = row[0] if row else 0
             last = max(0, (total - 1) // size)
             page = max(0, min(page, last))
-            rows = con.execute(
+            rows = self._fetch_all(
+                con,
                 f"""SELECT * FROM posts WHERE {predicate}
                 ORDER BY COALESCE(publish_at, created_at), created_at LIMIT ? OFFSET ?""",
                 (size, page * size),
             )
-            return [dict(r) for r in rows], total, page
+            return rows, total, page
 
     def occupied(self, channel_id, start, end, exclude_id):
         with self.connection() as con:
-            return {
-                r[0]
-                for r in con.execute(
-                    """SELECT publish_at FROM posts
+            cur = con.execute(
+                """SELECT publish_at FROM posts
                 WHERE channel_id=? AND publish_at>=? AND publish_at<? AND id<>?
                 AND status IN ('scheduled', 'retry', 'sending')""",
-                    (channel_id, start, end, exclude_id),
-                )
-            }
+                (channel_id, start, end, exclude_id),
+            )
+            rows = cur.fetchall()
+            return {r[0] for r in rows}
 
     def notifications(self, now):
         with self.connection() as con:
-            return [
-                dict(r)
-                for r in con.execute(
-                    """SELECT * FROM posts WHERE
+            return self._fetch_all(
+                con,
+                """SELECT * FROM posts WHERE
                 notification_pending=1 AND notify_after<=? ORDER BY updated_at LIMIT 10""",
-                    (now,),
-                )
-            ]
+                (now,),
+            )
 
     def notification_result(self, post_id, revision, delivered, now):
         with self.connection(write=True) as con:
