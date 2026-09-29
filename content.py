@@ -1,4 +1,4 @@
-"""Telegram content: preserve eentities and check before attempting a send."""
+"""Telegram content: preserve entities and check before attempting a send."""
 
 import re
 from datetime import datetime, timezone
