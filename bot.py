@@ -33,8 +33,6 @@ TIMES = (
     "08:25",
     "08:55",
     "09:25",
-    "09:35",
-    "09:56",
     "10:25",
     "11:25",
     "12:25",
@@ -42,7 +40,7 @@ TIMES = (
     "14:25",
     "15:25",
     "16:25",
-    "17:25",
+    "17:15",
     "18:25",
     "19:25",
     "20:25",
@@ -736,10 +734,13 @@ def main():
     try:
         config = Settings.load(ROOT)
         configure_logging(config.token)
-        lock = InstanceLock(config.db_path)
+        lock = InstanceLock()
         lock.acquire()
-        store = Store(config.db_path)
+        
+        # Передаємо db_url та db_token замість db_path
+        store = Store(config.db_url, config.db_token)
         store.initialize(config.admin_id, config.channels, config.timezone)
+        
         app = build_application(config, store)
         app.run_polling(
             allowed_updates=["message", "callback_query"], drop_pending_updates=False
