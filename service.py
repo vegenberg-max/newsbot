@@ -76,34 +76,25 @@ class Publisher:
 
     async def send_content(self, chat_id, post, reply_markup=None):
         text, entities = prepare(post)
-        if post.get("photo_file_id"):
-            return await self.bot.send_photo(
-                chat_id,
-                photo=post["photo_file_id"],
-                caption=text,
-                caption_entities=entities,
-                reply_markup=reply_markup,
-            )
-        if post.get("video_file_id"):
-            return await self.bot.send_video(
-                chat_id,
-                video=post["video_file_id"],
-                caption=text,
-                caption_entities=entities,
-                reply_markup=reply_markup,
-            )
+        
+        # Якщо в пості є фото, формуємо прев'ю через посилання (якщо воно є) або відправляємо як текст з посиланням
+        preview_url = post.get("preview_url")
+        
+        # Якщо у вас зберігається пряме посилання на фото у preview_url, воно підтягнеться як прев'ю.
+        # Якщо потрібен старий формат звичайного повідомлення без окремого file_id медіафайлу:
         return await self.bot.send_message(
             chat_id,
             text=text,
             entities=entities,
             reply_markup=reply_markup,
             link_preview_options=LinkPreviewOptions(
-                is_disabled=not bool(post.get("preview_url")),
-                url=post.get("preview_url"),
+                is_disabled=False,
+                url=preview_url,
                 show_above_text=True,
                 prefer_large_media=True,
             ),
         )
+
 
     async def publish(self, post_id, revision, timer=False, allow_uncertain=False):
         post = await db_call(self.store.get, post_id)
