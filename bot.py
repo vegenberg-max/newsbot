@@ -325,13 +325,24 @@ def payload(message):
     text = message.text or message.caption or ""
     entities = message.entities or message.caption_entities or []
     urls = extract_urls(text, entities)
-    preview = urls[0] if urls else None
+    
+    # Ігноруємо посилання на Telegram-канали/чати при пошуку фото-прев'ю, якщо є інші сайти
+    external_urls = [
+        u for u in urls 
+        if not any(domain in u.lower() for domain in ("t.me", "telegram.me", "telegram.dog"))
+    ]
+    preview = external_urls[0] if external_urls else (urls[0] if urls else None)
+    
     options = message.link_preview_options
     if options:
         if options.is_disabled:
             preview = None
         elif options.url and options.url.startswith(("https://", "http://")):
-            preview = options.url
+            if any(domain in options.url.lower() for domain in ("t.me", "telegram.me", "telegram.dog")) and external_urls:
+                preview = external_urls[0]
+            else:
+                preview = options.url
+                
     return {
         "text": text,
         "entities_json": json.dumps(
@@ -407,8 +418,14 @@ async def receive(update, context):
                         "Надішліть новий текст. Для видалення тексту скористайтеся кнопкою «Видалити текст»."
                     )
                 new = payload(message)
+                
+                # Зберігаємо існуюче прев'ю оригінальної новини
+                preview_url = post.get("preview_url") or new["preview_url"]
+                
                 changes = {
-                    key: new[key] for key in ("text", "entities_json", "preview_url")
+                    "text": new["text"],
+                    "entities_json": new["entities_json"],
+                    "preview_url": preview_url,
                 }
             elif kind == "media":
                 if not message.photo and not message.video:
