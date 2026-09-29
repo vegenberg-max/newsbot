@@ -80,10 +80,11 @@ async def present(target, text, keyboard=None):
         if target.message:
             try:
                 if target.message.caption is not None:
-                    await target.message.edit_caption(caption=text, reply_markup=markup)
+                    await target.edit_message_caption(caption=text, reply_markup=markup)
+                    return
                 else:
-                    await target.message.edit_text(text, reply_markup=markup)
-                return
+                    await target.edit_message_text(text=text, reply_markup=markup)
+                    return
             except BadRequest as exc:
                 detail = str(exc).lower()
                 if "message is not modified" in detail:
@@ -117,14 +118,19 @@ async def controls(target, post, context):
     own = post["owner_id"] == config.admin_id
     
     rows = []
-    # Якщо канал ще не обрано — пропонуємо вибір каналу
     if post["status"] == "draft" and post["channel_id"] is None:
         for index, name in enumerate(config.channels.values()):
             rows.append([Button(name, callback_data=action("ch", post, index))])
     elif post["status"] in EDITABLE and own:
+        # Відображення збереженої дати публікації у кнопці
+        if post["publish_at"]:
+            plan_label = f"🗓 Заплановано: {local_time(post['publish_at'], config)}"
+        else:
+            plan_label = "🗓 Вибрати дату і час"
+
         rows += [
             [Button("🚀 Опублікувати зараз", callback_data=action("send", post))],
-            [Button("🗓 Вибрати дату і час", callback_data=action("plan", post))],
+            [Button(plan_label, callback_data=action("plan", post))],
             [
                 Button("✏️ Текст", callback_data=action("edit", post)),
                 Button("🖼 Фото/відео", callback_data=action("media", post)),
@@ -146,17 +152,26 @@ async def controls(target, post, context):
 
     markup = Markup(rows)
 
-    # Якщо викликано з CallbackQuery (кліку по кнопці) — видаляємо старе повідомлення календаря/меню, 
-    # щоб прикріпити чистий предпросмотр з кнопками знизу
+    # Редагуємо поточне повідомлення на місці при виборі часу
     if isinstance(target, CallbackQuery):
         try:
-            await target.message.delete()
-        except TelegramError:
-            pass
-        chat_id = target.message.chat_id
-    else:
-        chat_id = target.chat_id
+            if target.message.caption is not None:
+                await target.edit_message_caption(caption=post["text"] or "", reply_markup=markup)
+                return
+            elif target.message.text is not None:
+                display_text = post["text"] or "Фото/відео"
+                await target.edit_message_text(text=display_text, reply_markup=markup)
+                return
+        except BadRequest as exc:
+            detail = str(exc).lower()
+            if "message is not modified" in detail:
+                return
+            try:
+                await target.message.delete()
+            except TelegramError:
+                pass
 
+    chat_id = target.message.chat_id if isinstance(target, CallbackQuery) else target.chat_id
     await pub.send_content(chat_id, post, reply_markup=markup)
 
 
@@ -235,10 +250,14 @@ async def calendar(target, post, context, day=None):
     text += "Оберіть час з меню або введіть його текстом:"
 
     rows, nav = [], []
+    prev_day = selected - timedelta(days=1)
+    next_day = selected + timedelta(days=1)
+
+    # Кнопки тепер прямо показують конкретні дати
     if selected > today:
-        nav.append(Button("← День", callback_data=action("day", post, (selected - timedelta(days=1)).isoformat())))
+        nav.append(Button(f"← {prev_day.strftime('%d.%m.%Y')}", callback_data=action("day", post, prev_day.isoformat())))
     if selected < today + timedelta(days=366):
-        nav.append(Button("День →", callback_data=action("day", post, (selected + timedelta(days=1)).isoformat())))
+        nav.append(Button(f"{next_day.strftime('%d.%m.%Y')} →", callback_data=action("day", post, next_day.isoformat())))
     if nav:
         rows.append(nav)
 
@@ -506,6 +525,11 @@ async def callbacks(update, context):
             post = await db_call(
                 pub.store.schedule, post["id"], revision, target, int(time.time())
             )
+            formatted_time = local_time(target, pub.settings)
+            try:
+                await query.answer(f"✅ Час встановлено: {formatted_time}", show_alert=True)
+            except TelegramError:
+                pass
             await controls(query, post, context)
         elif name in {"edit", "media", "clock", "date"}:
             if (
