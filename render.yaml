@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: newsbot
+    runtime: python
+    plan: 0.5c-512mb
+    numInstances: 1
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    disk:
+      name: newsbot-posts
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.15
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: DB_PATH
+        value: /var/data/posts.db
+      - key: PYTHONUNBUFFERED
+        value: "1"
