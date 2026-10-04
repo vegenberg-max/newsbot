@@ -1,3 +1,4 @@
+import httpx
 import asyncio
 import logging
 import re
@@ -73,7 +74,48 @@ class Publisher:
         if post["channel_id"] not in self.settings.channels:
             raise ContentError("Сначала выберите разрешённый канал.")
         return prepare(post)
+        
+    async def upload_photo_preview(self, file_id):
+        if not file_id or not self.settings.imgbb_api_key:
+            return None
 
+        try:
+        # Забираємо оригінальне фото з Telegram
+            tg_file = await self.bot.get_file(file_id)
+            photo = await tg_file.download_as_bytearray()
+
+        # Завантажуємо його на ImgBB
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.imgbb.com/1/upload",
+                    params={"key": self.settings.imgbb_api_key},
+                    files={
+                        "image": (
+                            "telegram.jpg",
+                            bytes(photo),
+                            "image/jpeg",
+                        )
+                    },
+                )
+
+                response.raise_for_status()
+                data = response.json()
+
+            if not data.get("success"):
+                raise RuntimeError("ImgBB returned success=false")
+
+            url = data.get("data", {}).get("url")
+
+            if not url:
+                raise RuntimeError("ImgBB did not return image URL")
+
+            logger.info("Photo uploaded to ImgBB for preview")
+            return url
+
+        except Exception:
+            logger.exception("Could not upload Telegram photo to ImgBB")
+            return None
+        
     async def send_content(self, chat_id, post, reply_markup=None):
         text, entities = prepare(post)
         
