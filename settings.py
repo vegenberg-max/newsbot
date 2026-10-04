@@ -48,6 +48,7 @@ class Settings:
             # Читаємо URL та токен Turso з змінних оточення (або z settings.json)
             db_url = os.environ.get("DB_URL", raw.get("db_url", "posts.db")).strip()
             db_token = os.environ.get("DB_TOKEN", raw.get("db_token", "")).strip()
+            imgbb_api_key = os.environ.get("IMGBB_API_KEY",raw.get("imgbb_api_key", "")).strip()
 
         except (ValueError, TypeError, KeyError, OSError, AttributeError) as exc:
             raise ConfigError(
@@ -73,7 +74,18 @@ class Settings:
         if not 0 <= late <= 1440:
             raise ConfigError("late_minutes должен быть от 0 до 1440.")
 
-        return cls(token, admin, channels, db_url, db_token, zone, late)
+        return cls(token, admin, channels, db_url, db_token, imgbb_api_key, zone, late)
+
+@dataclass(frozen=True)
+class Settings:
+    token: str
+    admin_id: int
+    channels: dict[int, str]
+    db_url: str
+    db_token: str
+    imgbb_api_key: str = ""
+    timezone: str = "Europe/Kyiv"
+    late_minutes: int = 15
 
 
 class InstanceLock:
