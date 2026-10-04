@@ -48,6 +48,26 @@ TIMES = (
     "22:00",
 )
 
+ALT_TIMES = (
+    "07:55",
+    "08:55",
+    "09:55",
+    "10:55",
+    "11:55",
+    "12:55",
+    "13:55",
+    "14:55",
+    "15:55",
+    "16:55",
+    "17:55",
+    "18:55",
+    "19:55",
+    "20:55",
+    "21:55",
+    "22:55",
+)
+
+
 DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 MONTHS_UA = [
     "січ", "лют", "берез", "квіт", "трав", "черв", 
@@ -568,6 +588,7 @@ async def callbacks(update, context):
                 pub.validate(post)
             if name == "clock" and len(parts) != 4:
                 raise ContentError("Відкрийте календар заново.")
+            
             context.user_data["await"] = {
                 "kind": name,
                 "id": post["id"],
@@ -575,13 +596,54 @@ async def callbacks(update, context):
                 "date": parts[3] if name == "clock" else None,
                 "expires": time.time() + 900,
             }
+            
+            if name == "clock":
+                day_str = parts[3]
+                text = "✍️ Оберіть альтернативний час зі списку нижче або просто надішліть свій час текстом (наприклад, 14:42):"
+                
+                # Отримуємо зайняті слоти для цього дня, щоб ховати зайняте
+                tz = ZoneInfo(pub.settings.timezone)
+                selected = datetime.strptime(day_str, "%Y-%m-%d").date()
+                midnight = datetime.combine(selected, datetime.min.time(), tzinfo=tz)
+                start_ts = int(midnight.timestamp())
+                end_ts = int((midnight + timedelta(days=1)).timestamp())
+                daily_items = await get_daily_items(pub, post, start_ts, end_ts)
+                occupied = {item["publish_at"] for item in daily_items}
+
+                # Генеруємо сітку кнопок з ALT_TIMES без зайнятих годин
+                rows = []
+                current = []
+                for value in ALT_TIMES:
+                    try:
+                        stamp = parse_local_time(day_str, value, pub.settings.timezone, int(time.time()))
+                    except ContentError:
+                        continue
+                    
+                    # Якщо цей час зайнятий — пропускаємо, кнопка не з'явиться
+                    if stamp in occupied:
+                        continue
+
+                    data = day_str.replace("-", "") + value.replace(":", "")
+                    current.append(Button(value, callback_data=action("time", post, data)))
+                    if len(current) == 3:
+                        rows.append(current)
+                        current = []
+                if current:
+                    rows.append(current)
+                
+                rows.append([Button("← Назад", callback_data=action("plan", post, day_str))])
+                markup = Markup(rows)
+                await query.message.reply_text(text + "\n/cancel — скасувати введення.", reply_markup=markup)
+                return
+
             prompts = {
                 "edit": "Надішліть новий текст.",
                 "media": "Надішліть нове фото або відео.",
-                "clock": "✍️ Надішліть час для публікації текстом (наприклад: 09:25 або 18:40):",
                 "date": "Введіть дату у форматі РРРР-ММ-ДД (наприклад: 2026-09-30):",
             }
             await query.message.reply_text(prompts[name] + "\n/cancel — скасувати введення.")
+
+
         elif name in {"clear", "nomed"}:
             changes = (
                 {"text": "", "entities_json": "[]", "preview_url": None}
