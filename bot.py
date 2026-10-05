@@ -722,6 +722,8 @@ def payload(message):
     entities = message.entities or message.caption_entities or []
     urls = extract_urls(text, entities)
 
+    # Telegram-посилання не використовуємо як preview_url,
+    # інакше Telegram показує картку каналу замість потрібної картинки.
     external_urls = [
         url
         for url in urls
@@ -731,25 +733,22 @@ def payload(message):
         )
     ]
 
-    preview = external_urls[0] if external_urls else (urls[0] if urls else None)
+    preview = external_urls[0] if external_urls else None
 
     options = message.link_preview_options
 
     if options:
         if options.is_disabled:
             preview = None
-
-        elif options.url and options.url.startswith(("https://", "http://")):
-            if (
-                any(
-                    domain in options.url.lower()
-                    for domain in ("t.me", "telegram.me", "telegram.dog")
-                )
-                and external_urls
-            ):
-                preview = external_urls[0]
-            else:
-                preview = options.url
+        elif (
+            options.url
+            and options.url.startswith(("https://", "http://"))
+            and not any(
+                domain in options.url.lower()
+                for domain in ("t.me", "telegram.me", "telegram.dog")
+            )
+        ):
+            preview = options.url
 
     return {
         "text": text,
