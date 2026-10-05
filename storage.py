@@ -164,26 +164,35 @@ class Store:
         }
         if not changes or not set(changes) <= allowed:
             raise ValueError("Unknown editable field")
+
         with self.connection(write=True) as con:
             post = self._get(con, post_id)
             self._check(post, revision, EDITABLE)
+
             if "channel_id" in changes and post["status"] != "draft":
                 raise Conflict("Канал можно выбирать только у нового черновика.")
+
             assignments = ", ".join(name + " = ?" for name in changes)
+
             con.execute(
-                f"UPDATE posts SET {assignments}, revision = revision + 1, updated_at = ? WHERE id = ?",
+                f"""UPDATE posts SET {assignments},
+                revision=revision+1, updated_at=? WHERE id=?""",
                 (*changes.values(), int(time.time()), post_id),
             )
+
             return self._get(con, post_id)
 
     def schedule(self, post_id, revision, target, now):
         if target <= now or target % 60:
             raise StoreError("Выберите будущую минуту публикации.")
+
         with self.connection(write=True) as con:
             post = self._get(con, post_id)
             self._check(post, revision, EDITABLE)
+
             if post["channel_id"] is None:
                 raise StoreError("Сначала выберите канал.")
+
             try:
                 con.execute(
                     """UPDATE posts SET status='scheduled', publish_at=?, retry_at=NULL,
@@ -192,57 +201,73 @@ class Store:
                     (target, now, post_id),
                 )
             except Exception as exc:
-                if "UNIQUE constraint failed" in str(exc) or "one_post_per_channel_minute" in str(exc):
+                if (
+                    "UNIQUE constraint failed" in str(exc)
+                    or "one_post_per_channel_minute" in str(exc)
+                ):
                     raise Occupied(
                         "В этом канале уже есть пост на эту минуту. Выберите другое время."
                     ) from exc
-                raise exc
+                raise
+
             return self._get(con, post_id)
 
     def cancel(self, post_id, revision):
         with self.connection(write=True) as con:
             post = self._get(con, post_id)
             self._check(post, revision, EDITABLE | {"uncertain"})
+
             con.execute(
                 """UPDATE posts SET status='cancelled', revision=revision+1,
                 updated_at=?, notification_pending=0 WHERE id=?""",
                 (int(time.time()), post_id),
             )
+
             return self._get(con, post_id)
 
     def resolve_sent(self, post_id, revision):
         with self.connection(write=True) as con:
             post = self._get(con, post_id)
             self._check(post, revision, {"uncertain"})
+
             con.execute(
                 """UPDATE posts SET status='published', revision=revision+1,
                 last_error='Публикация подтверждена пользователем.', updated_at=?,
                 notification_pending=0 WHERE id=?""",
                 (int(time.time()), post_id),
             )
+
             return self._get(con, post_id)
 
     def claim(self, post_id, revision, now, timer=False, allow_uncertain=False):
         allowed = {"scheduled", "retry"} if timer else EDITABLE
+
         if allow_uncertain:
             allowed = allowed | {"uncertain"}
+
         with self.connection(write=True) as con:
             post = self._get(con, post_id)
             self._check(post, revision, allowed)
+
             due = post["retry_at"] if post["status"] == "retry" else post["publish_at"]
+
             if timer and (due is None or due > now):
                 raise Conflict("Время публикации ещё не наступило.")
+
             if post["status"] == "retry" and due and due > now:
                 raise Conflict(
                     "Telegram попросил подождать. Бот повторит отправку в указанное время."
                 )
+
             token = uuid.uuid4().hex
+
             con.execute(
                 """UPDATE posts SET status='sending', attempt_token=?, attempts=attempts+1,
                 publish_at=CASE WHEN ? THEN publish_at ELSE NULL END,
                 revision=revision+1, updated_at=?, notification_pending=0 WHERE id=?""",
                 (token, timer, now, post_id),
             )
+
             return self._get(con, post_id)
 
     def finish(
@@ -250,11 +275,13 @@ class Store:
     ):
         if state not in {"published", "failed", "uncertain", "retry"}:
             raise ValueError("Invalid send result")
+
         with self.connection(write=True) as con:
             result = con.execute(
                 """UPDATE posts SET status=?, last_error=?, sent_message_ids=?,
                 retry_at=?, revision=revision+1, updated_at=?, notification_pending=1,
-                notify_after=0, notify_attempts=0 WHERE id=? AND status='sending' AND attempt_token=?""",
+                notify_after=0, notify_attempts=0
+                WHERE id=? AND status='sending' AND attempt_token=?""",
                 (
                     state,
                     error,
@@ -265,14 +292,17 @@ class Store:
                     token,
                 ),
             )
+
             if getattr(result, "rowcount", 1) == 0:
                 raise Conflict("Результат отправки не удалось сопоставить с постом.")
+
             return self._get(con, post_id)
 
     def fail_before_send(self, post_id, revision, reason):
         with self.connection(write=True) as con:
             post = self._get(con, post_id)
             self._check(post, revision, EDITABLE)
+
             con.execute(
                 """UPDATE posts SET status='failed', last_error=?, revision=revision+1,
                 updated_at=?, notification_pending=1, notify_after=0 WHERE id=?""",
@@ -287,6 +317,7 @@ class Store:
                 updated_at=?, notification_pending=1, notify_after=0 WHERE status='sending'""",
                 (now,),
             )
+
         self.expire(now, grace)
 
     def expire(self, now, grace):
@@ -310,23 +341,163 @@ class Store:
             )
 
     def page(self, page=0, history=False, size=8):
+        """
+        Старый метод оставлен для совместимости.
+
+        Главное изменение:
+        история теперь показывает самые новые записи первыми.
+        """
         predicate = (
             "status IN ('published', 'cancelled')"
             if history
             else "status NOT IN ('published', 'cancelled')"
         )
+
         with self.connection() as con:
-            row = con.execute(f"SELECT COUNT(*) FROM posts WHERE {predicate}").fetchone()
+            row = con.execute(
+                f"SELECT COUNT(*) FROM posts WHERE {predicate}"
+            ).fetchone()
+
             total = row[0] if row else 0
             last = max(0, (total - 1) // size)
             page = max(0, min(page, last))
+
+            order = (
+                "updated_at DESC, created_at DESC"
+                if history
+                else "COALESCE(publish_at, created_at), created_at"
+            )
+
             rows = self._fetch_all(
                 con,
                 f"""SELECT * FROM posts WHERE {predicate}
-                ORDER BY COALESCE(publish_at, created_at), created_at LIMIT ? OFFSET ?""",
+                ORDER BY {order} LIMIT ? OFFSET ?""",
                 (size, page * size),
             )
+
             return rows, total, page
+
+    def published_page(self, page=0, size=10):
+        """
+        Успешно опубликованные посты.
+        Самые новые показываются первыми.
+        """
+        with self.connection() as con:
+            row = con.execute(
+                "SELECT COUNT(*) FROM posts WHERE status='published'"
+            ).fetchone()
+
+            total = row[0] if row else 0
+            last = max(0, (total - 1) // size)
+            page = max(0, min(page, last))
+
+            rows = self._fetch_all(
+                con,
+                """SELECT * FROM posts
+                WHERE status='published'
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ? OFFSET ?""",
+                (size, page * size),
+            )
+
+            return rows, total, page
+
+    def failed_page(self, page=0, size=10):
+        """
+        Посты, которые не были нормально опубликованы.
+
+        Сюда входят:
+        failed
+        overdue
+        needs_review
+        uncertain
+
+        Обычные будущие scheduled сюда НЕ входят.
+        """
+        with self.connection() as con:
+            row = con.execute(
+                """SELECT COUNT(*) FROM posts
+                WHERE status IN ('failed', 'overdue', 'needs_review', 'uncertain')"""
+            ).fetchone()
+
+            total = row[0] if row else 0
+            last = max(0, (total - 1) // size)
+            page = max(0, min(page, last))
+
+            rows = self._fetch_all(
+                con,
+                """SELECT * FROM posts
+                WHERE status IN ('failed', 'overdue', 'needs_review', 'uncertain')
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ? OFFSET ?""",
+                (size, page * size),
+            )
+
+            return rows, total, page
+
+    def scheduled_page(self, page=0, size=10, now=None):
+        """
+        Будущие публикации.
+
+        Ближайшая будущая публикация показывается первой.
+        """
+        if now is None:
+            now = int(time.time())
+
+        with self.connection() as con:
+            row = con.execute(
+                """SELECT COUNT(*) FROM posts
+                WHERE status IN ('scheduled', 'retry')
+                AND COALESCE(retry_at, publish_at) > ?""",
+                (now,),
+            ).fetchone()
+
+            total = row[0] if row else 0
+            last = max(0, (total - 1) // size)
+            page = max(0, min(page, last))
+
+            rows = self._fetch_all(
+                con,
+                """SELECT * FROM posts
+                WHERE status IN ('scheduled', 'retry')
+                AND COALESCE(retry_at, publish_at) > ?
+                ORDER BY COALESCE(retry_at, publish_at) ASC, created_at ASC
+                LIMIT ? OFFSET ?""",
+                (now, size, page * size),
+            )
+
+            return rows, total, page
+
+    def publication_counts(self, now=None):
+        """
+        Количество постов для будущего меню:
+        опубликованные / не опубликованные / запланированные.
+        """
+        if now is None:
+            now = int(time.time())
+
+        with self.connection() as con:
+            published = con.execute(
+                "SELECT COUNT(*) FROM posts WHERE status='published'"
+            ).fetchone()[0]
+
+            failed = con.execute(
+                """SELECT COUNT(*) FROM posts
+                WHERE status IN ('failed', 'overdue', 'needs_review', 'uncertain')"""
+            ).fetchone()[0]
+
+            scheduled = con.execute(
+                """SELECT COUNT(*) FROM posts
+                WHERE status IN ('scheduled', 'retry')
+                AND COALESCE(retry_at, publish_at) > ?""",
+                (now,),
+            ).fetchone()[0]
+
+            return {
+                "published": published,
+                "failed": failed,
+                "scheduled": scheduled,
+            }
 
     def occupied(self, channel_id, start, end, exclude_id):
         with self.connection() as con:
@@ -336,6 +507,7 @@ class Store:
                 AND status IN ('scheduled', 'retry', 'sending')""",
                 (channel_id, start, end, exclude_id),
             )
+
             rows = cur.fetchall()
             return {r[0] for r in rows}
 
@@ -344,7 +516,8 @@ class Store:
             return self._fetch_all(
                 con,
                 """SELECT * FROM posts WHERE
-                notification_pending=1 AND notify_after<=? ORDER BY updated_at LIMIT 10""",
+                notification_pending=1 AND notify_after<=?
+                ORDER BY updated_at LIMIT 10""",
                 (now,),
             )
 
@@ -361,3 +534,48 @@ class Store:
                     WHERE id=? AND revision=?""",
                     (now + 300, post_id, revision),
                 )
+
+    def cleanup_old_posts(
+        self,
+        now=None,
+        published_days=3,
+        cancelled_days=3,
+        problem_days=7,
+    ):
+        """
+        Удаляет старые завершённые записи, чтобы база не росла бесконечно.
+
+        published  -> через 3 дня
+        cancelled  -> через 3 дня
+        failed / overdue / needs_review -> через 7 дней
+
+        ВАЖНО:
+        uncertain специально НЕ удаляем автоматически.
+        scheduled / retry / sending / draft тоже никогда здесь не удаляются.
+        """
+        if now is None:
+            now = int(time.time())
+
+        published_before = now - published_days * 86400
+        cancelled_before = now - cancelled_days * 86400
+        problem_before = now - problem_days * 86400
+
+        with self.connection(write=True) as con:
+            con.execute(
+                """DELETE FROM posts
+                WHERE status='published' AND updated_at < ?""",
+                (published_before,),
+            )
+
+            con.execute(
+                """DELETE FROM posts
+                WHERE status='cancelled' AND updated_at < ?""",
+                (cancelled_before,),
+            )
+
+            con.execute(
+                """DELETE FROM posts
+                WHERE status IN ('failed', 'overdue', 'needs_review')
+                AND updated_at < ?""",
+                (problem_before,),
+            )
