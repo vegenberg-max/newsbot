@@ -1094,4 +1094,540 @@ async def callbacks(update, context):
             await publication_listing(
                 query,
                 context,
-                "
+                "failed",
+                max(0, int(parts[1])),
+            )
+            return
+
+        if name == "plans" and len(parts) == 2:
+            context.user_data.pop("await", None)
+            await publication_listing(
+                query,
+                context,
+                "scheduled",
+                max(0, int(parts[1])),
+            )
+            return
+
+        if name == "show" and len(parts) == 2:
+            context.user_data.pop("await", None)
+
+            post = await db_call(pub.store.get, parts[1])
+            add_work_post(context, post["id"], make_active=True)
+
+            await controls(query, post, context)
+            return
+
+        if len(parts) not in {3, 4}:
+            raise ContentError("Це меню старої версії. Відкрийте /scheduled.")
+
+        post = await db_call(pub.store.get, parts[1])
+        revision = int(parts[2])
+
+        if post["revision"] != revision:
+            raise Conflict(
+                "Це старе меню. Відкрийте актуальний пост через /scheduled."
+            )
+
+        add_work_post(context, post["id"], make_active=True)
+
+        if name == "view":
+            await pub.send_content(pub.settings.admin_id, post)
+
+        elif name == "ch" and len(parts) == 4:
+            index = int(parts[3])
+            channels = list(pub.settings.channels)
+
+            if not 0 <= index < len(channels):
+                raise ContentError("Канал не знайдено.")
+
+            post = await db_call(
+                pub.store.edit,
+                post["id"],
+                revision,
+                {"channel_id": channels[index]},
+            )
+
+            add_work_post(context, post["id"], make_active=True)
+            await controls(query, post, context)
+
+        elif name in {"send", "yesag"}:
+            post = await pub.publish(
+                post["id"],
+                revision,
+                allow_uncertain=name == "yesag",
+            )
+
+            add_work_post(context, post["id"], make_active=True)
+            await controls(query, post, context)
+
+        elif name in {"plan", "day"}:
+            if post["status"] not in EDITABLE:
+                raise Conflict("Цей пост зараз не можна перенести.")
+
+            await calendar(
+                query,
+                post,
+                context,
+                parts[3] if name == "day" and len(parts) == 4 else None,
+            )
+
+        elif name == "time" and len(parts) == 4:
+            value = parts[3]
+
+            if len(value) != 12 or not value.isdigit():
+                raise ContentError(
+                    "Пошкоджено кнопку часу. Відкрийте календар заново."
+                )
+
+            day = f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+
+            target = parse_local_time(
+                day,
+                value[8:10] + ":" + value[10:12],
+                pub.settings.timezone,
+                int(time.time()),
+            )
+
+            pub.validate(post)
+
+            post = await db_call(
+                pub.store.schedule,
+                post["id"],
+                revision,
+                target,
+                int(time.time()),
+            )
+
+            add_work_post(context, post["id"], make_active=True)
+
+            tz = ZoneInfo(pub.settings.timezone)
+            dt = datetime.fromtimestamp(target, tz)
+
+            text = (
+                f"✅ ⏰ Пост заплановано на "
+                f"{dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
+            )
+
+            try:
+                await query.edit_message_text(text)
+            except TelegramError:
+                await query.message.reply_text(text)
+
+            await controls(query.message, post, context)
+
+        elif name in {"clock", "date"}:
+            if (
+                post["status"] not in EDITABLE
+                or post["owner_id"] != pub.settings.admin_id
+            ):
+                raise Conflict("Цей пост зараз не можна редагувати.")
+
+            pub.validate(post)
+
+            if name == "clock" and len(parts) != 4:
+                raise ContentError("Відкрийте календар заново.")
+
+            context.user_data["await"] = {
+                "kind": name,
+                "id": post["id"],
+                "revision": revision,
+                "date": parts[3] if name == "clock" else None,
+                "expires": time.time() + 900,
+            }
+
+            if name == "clock":
+                day_str = parts[3]
+                text = (
+                    "✍️ Оберіть альтернативний час зі списку нижче або просто "
+                    "надішліть свій час текстом (наприклад, 14:42):"
+                )
+
+                tz = ZoneInfo(pub.settings.timezone)
+                selected = datetime.strptime(day_str, "%Y-%m-%d").date()
+                midnight = datetime.combine(
+                    selected,
+                    datetime.min.time(),
+                    tzinfo=tz,
+                )
+
+                start_ts = int(midnight.timestamp())
+                end_ts = int((midnight + timedelta(days=1)).timestamp())
+
+                daily_items = await get_daily_items(
+                    pub,
+                    post,
+                    start_ts,
+                    end_ts,
+                )
+
+                occupied = {item["publish_at"] for item in daily_items}
+
+                rows = []
+                current = []
+
+                for value in ALT_TIMES:
+                    try:
+                        stamp = parse_local_time(
+                            day_str,
+                            value,
+                            pub.settings.timezone,
+                            int(time.time()),
+                        )
+                    except ContentError:
+                        continue
+
+                    if stamp in occupied:
+                        continue
+
+                    data = day_str.replace("-", "") + value.replace(":", "")
+                    current.append(
+                        Button(
+                            value,
+                            callback_data=action("time", post, data),
+                        )
+                    )
+
+                    if len(current) == 3:
+                        rows.append(current)
+                        current = []
+
+                if current:
+                    rows.append(current)
+
+                rows.append(
+                    [
+                        Button(
+                            "← Назад",
+                            callback_data=action("plan", post, day_str),
+                        )
+                    ]
+                )
+
+                await query.message.reply_text(
+                    text + "\n/cancel — скасувати введення.",
+                    reply_markup=Markup(rows),
+                )
+                return
+
+            await query.message.reply_text(
+                "Введіть дату у форматі РРРР-ММ-ДД "
+                "(наприклад: 2026-09-30):\n"
+                "/cancel — скасувати введення."
+            )
+
+        elif name == "clear":
+            changes = {
+                "text": "",
+                "entities_json": "[]",
+            }
+
+            if not post["photo_file_id"] and not post["video_file_id"]:
+                changes["preview_url"] = None
+
+            prepare({**post, **changes})
+
+            post = await db_call(
+                pub.store.edit,
+                post["id"],
+                revision,
+                changes,
+            )
+
+            add_work_post(context, post["id"], make_active=True)
+            await controls(query, post, context)
+
+        elif name == "nomed":
+            changes = {
+                "preview_url": None,
+                "photo_file_id": None,
+                "video_file_id": None,
+            }
+
+            prepare({**post, **changes})
+
+            post = await db_call(
+                pub.store.edit,
+                post["id"],
+                revision,
+                changes,
+            )
+
+            add_work_post(context, post["id"], make_active=True)
+            await controls(query, post, context)
+
+        elif name == "del":
+            await present(
+                query,
+                "Видалити цей пост з черги? "
+                "Повідомлення, які вже з'явилися в каналі, залишаться там.",
+                [
+                    [
+                        Button(
+                            "Так, видалити",
+                            callback_data=action("yesdel", post),
+                        )
+                    ],
+                    [Button("Назад", callback_data=f"show|{post['id']}")],
+                ],
+            )
+
+        elif name == "yesdel":
+            post = await db_call(
+                pub.store.cancel,
+                post["id"],
+                revision,
+            )
+
+            remove_work_post(context, post["id"])
+
+            rows = await work_switch_rows(context)
+            rows.append(
+                [
+                    Button("📋 Черга", callback_data="list|0"),
+                    Button("📜 Історія", callback_data="history"),
+                ]
+            )
+
+            await present(query, "🗑 Пост видалено з черги.", rows)
+
+        elif name == "done":
+            post = await db_call(
+                pub.store.resolve_sent,
+                post["id"],
+                revision,
+            )
+
+            add_work_post(context, post["id"], make_active=True)
+            await controls(query, post, context)
+
+        elif name == "again":
+            if post["status"] != "uncertain":
+                raise Conflict("Відкрийте пост заново.")
+
+            await present(
+                query,
+                "Надіслати ще раз? Натискайте лише якщо перевірили канал "
+                "і поста там немає.",
+                [
+                    [
+                        Button(
+                            "Перевірив: поста немає, надіслати",
+                            callback_data=action("yesag", post),
+                        )
+                    ],
+                    [Button("Назад", callback_data=f"show|{post['id']}")],
+                ],
+            )
+
+        # Сумісність зі старими повідомленнями, де ще є
+        # кнопки "Текст" та "Фото/відео".
+        elif name == "edit":
+            if (
+                post["status"] not in EDITABLE
+                or post["owner_id"] != pub.settings.admin_id
+            ):
+                raise Conflict("Цей пост зараз не можна редагувати.")
+
+            add_work_post(context, post["id"], make_active=True)
+
+            await query.message.reply_text(
+                "Пост активовано. Просто надішліть новий текст — "
+                "він замінить текст цього поста."
+            )
+
+        elif name == "media":
+            if (
+                post["status"] not in EDITABLE
+                or post["owner_id"] != pub.settings.admin_id
+            ):
+                raise Conflict("Цей пост зараз не можна редагувати.")
+
+            add_work_post(context, post["id"], make_active=True)
+
+            await query.message.reply_text(
+                "Пост активовано. Просто надішліть нове фото або відео."
+            )
+
+        else:
+            raise ContentError("Кнопка застаріла. Відкрийте /scheduled.")
+
+    except (ContentError, StoreError) as exc:
+        if query.message:
+            await query.message.reply_text(str(exc))
+
+    except (ValueError, IndexError):
+        if query.message:
+            await query.message.reply_text(
+                "Не вдалося прочитати кнопку. Відкрийте /scheduled заново."
+            )
+
+
+async def error_handler(update, context):
+    logger.error(
+        "Handler failed",
+        exc_info=(type(context.error), context.error, context.error.__traceback__),
+    )
+
+    if (
+        isinstance(update, Update)
+        and authorized(update, context)
+        and update.effective_message
+    ):
+        try:
+            await update.effective_message.reply_text(
+                "Не вдалося завершити дію або оновити меню. "
+                "Відкрийте /scheduled і перевірте стан поста перед повтором."
+            )
+        except TelegramError:
+            pass
+
+
+async def unknown_command(update, context):
+    if authorized(update, context):
+        await update.effective_message.reply_text(
+            "Невідома команда. Допомога: /start."
+        )
+
+
+async def post_init(application):
+    pub = application.bot_data["publisher"]
+    now = int(time.time())
+
+    await db_call(
+        pub.store.recover,
+        now,
+        pub.settings.late_minutes * 60,
+    )
+
+    await db_call(
+        pub.store.cleanup_old_posts,
+        now,
+    )
+
+    application.job_queue.run_repeating(
+        pub.tick,
+        interval=5,
+        first=1,
+        job_kwargs={
+            "max_instances": 1,
+            "coalesce": True,
+            "misfire_grace_time": 60,
+        },
+    )
+
+    try:
+        await application.bot.send_message(
+            pub.settings.admin_id,
+            "Бот запущено.\n\n"
+            "Чернетки та черга: /scheduled\n"
+            "Публікації: /history\n\n"
+            "Якщо бот ще не спілкувався з вами, натисніть /start.",
+        )
+    except TelegramError:
+        logger.warning(
+            "Administrator notification unavailable; user may need to press /start"
+        )
+
+
+def build_application(config, store):
+    application = (
+        Application.builder()
+        .token(config.token)
+        .post_init(post_init)
+        .connect_timeout(10)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(10)
+        .concurrent_updates(False)
+        .build()
+    )
+
+    application.bot_data["publisher"] = Publisher(
+        store,
+        config,
+        application.bot,
+    )
+
+    for name, handler in [
+        ("start", start),
+        ("help", start),
+        ("id", identity),
+        ("scheduled", list_command),
+        ("history", history_command),
+        ("cancel", cancel_input),
+    ]:
+        application.add_handler(
+            CommandHandler(
+                name,
+                handler,
+                filters=filters.ChatType.PRIVATE & filters.UpdateType.MESSAGE,
+            )
+        )
+
+    application.add_handler(CallbackQueryHandler(callbacks))
+
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.MESSAGE
+            & filters.ChatType.PRIVATE
+            & filters.COMMAND,
+            unknown_command,
+        )
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.UpdateType.MESSAGE
+            & filters.ChatType.PRIVATE
+            & ~filters.COMMAND,
+            receive,
+        )
+    )
+
+    application.add_error_handler(error_handler)
+
+    return application
+
+
+def main():
+    lock = None
+
+    try:
+        config = Settings.load(ROOT)
+        configure_logging(config.token)
+
+        lock = InstanceLock()
+        lock.acquire()
+
+        store = Store(config.db_url, config.db_token)
+        store.initialize(config.admin_id, config.channels, config.timezone)
+
+        app = build_application(config, store)
+
+        app.run_polling(
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=False,
+        )
+
+    except (ConfigError, StoreError) as exc:
+        print(f"Бот не запущено: {exc}")
+        raise SystemExit(1) from exc
+
+    except Exception:
+        logger.exception("Bot stopped because of an error")
+
+        print(
+            "Бот зупинено. Перевірте налаштування, доступ до бази "
+            "та повідомлення про помилку вище."
+        )
+
+        raise SystemExit(1) from None
+
+    finally:
+        if lock:
+            lock.close()
+
+
+if __name__ == "__main__":
+    main()
