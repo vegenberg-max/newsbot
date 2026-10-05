@@ -166,6 +166,85 @@ class Publisher:
 
             return None
 
+    async def save_photo_preview(self, file_id):
+        """
+        Зберігає НОВЕ фото активного поста на ImgBB.
+
+        Цей метод використовується при ручному редагуванні:
+        користувач надсилає нове фото -> bot.py викликає цей
+        метод -> у пост записується постійний preview_url.
+
+        На відміну від автоматичного fallback під час публікації,
+        тут помилка ImgBB повертається користувачу, тому що нове
+        зображення не можна вважати успішно збереженим без
+        постійного URL.
+        """
+
+        if not file_id:
+            raise ContentError(
+                "Не удалось получить фотографию."
+            )
+
+        if not self.settings.imgbb_api_key:
+            raise ContentError(
+                "IMGBB_API_KEY не настроен. "
+                "Новое изображение нельзя сохранить."
+            )
+
+        try:
+            tg_file = await self.bot.get_file(file_id)
+            photo = await tg_file.download_as_bytearray()
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    "https://api.imgbb.com/1/upload",
+                    params={
+                        "key": self.settings.imgbb_api_key,
+                    },
+                    files={
+                        "image": (
+                            "telegram.jpg",
+                            bytes(photo),
+                            "image/jpeg",
+                        )
+                    },
+                )
+
+                response.raise_for_status()
+                data = response.json()
+
+            if not data.get("success"):
+                raise RuntimeError(
+                    "ImgBB returned success=false"
+                )
+
+            url = data.get("data", {}).get("url")
+
+            if not url:
+                raise RuntimeError(
+                    "ImgBB did not return image URL"
+                )
+
+            logger.info(
+                "Edited post photo uploaded to ImgBB"
+            )
+
+            return url
+
+        except ContentError:
+            raise
+
+        except Exception as exc:
+            logger.exception(
+                "Could not save edited post photo to ImgBB"
+            )
+
+            raise ContentError(
+                "Не удалось сохранить новое изображение. "
+                "Старое изображение поста не изменено. "
+                "Попробуйте ещё раз."
+            ) from exc
+
     async def send_content(
         self,
         chat_id,
@@ -529,6 +608,18 @@ class Publisher:
                 self.store.expire,
                 now,
                 self.settings.late_minutes * 60,
+            )
+
+            # Періодично прибираємо старі завершені записи.
+            #
+            # published / cancelled -> через 3 дні
+            # failed / overdue / needs_review -> через 7 днів
+            #
+            # scheduled / retry / sending / uncertain / draft
+            # цей метод не видаляє.
+            await db_call(
+                self.store.cleanup_old_posts,
+                now,
             )
 
             for post in await db_call(
