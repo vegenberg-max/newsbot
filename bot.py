@@ -854,7 +854,7 @@ async def edit_active_post(message, context, post):
 
         # Якщо власного фото/відео немає, link preview
         # повинен відповідати саме новому тексту.
-        if not post["photo_file_id"] and not post["video_file_id"]:
+        if not post.get("preview_url") and not post["photo_file_id"] and not post["video_file_id"]:
             changes["preview_url"] = new["preview_url"]
 
         prepare({**post, **changes})
