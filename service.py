@@ -498,10 +498,26 @@ class Publisher:
             retry_at,
         )
 
-        return await self.persist_result(
+        result = await self.persist_result(
             token,
             post_id,
         )
+
+        # Ручна успішна публікація вже підтверджується у bot.py.
+        # Позначаємо системне сповіщення доставленим, щоб notify()
+        # не надсилав друге повідомлення з кнопкою «Открыть пост».
+        # Автоматичні публікації (timer=True) продовжують
+        # отримувати звичайні сповіщення.
+        if not timer and result["status"] == "published":
+            await db_call(
+                self.store.notification_result,
+                result["id"],
+                result["revision"],
+                True,
+                int(time.time()),
+            )
+
+        return result
 
     async def persist_result(
         self,
