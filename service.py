@@ -285,6 +285,12 @@ class Publisher:
             preview_url = await self.upload_photo_preview(
                 post["photo_file_id"]
             )
+            if not preview_url:
+                raise ContentError(
+                    "Не вдалося створити превʼю зображення. "
+                    "Пост збережено, але без картинки його не буде надіслано. "
+                    "Спробуйте замінити фото або перевірте ImgBB."
+                )
 
         # ---------------------------------------------------------
         # 3. Якщо є URL прев'ю:

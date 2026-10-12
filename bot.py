@@ -96,6 +96,32 @@ def authorized(update, context):
     )
 
 
+def post_title(post):
+    value = (post.get("text") or "").strip().splitlines()
+    title = (value[0] if value else "Фото/відео").strip()
+    return title[:90] + ("…" if len(title) > 90 else "")
+
+
+def schedule_confirmation(post, settings):
+    return (
+        "✅ Пост заплановано\n\n"
+        f"📰 {post_title(post)}\n"
+        f"📅 {local_time(post['publish_at'], settings)}\n"
+        f"📢 {settings.channels.get(post['channel_id'], 'Канал')}\n\n"
+        "Змінити: /scheduled"
+    )
+
+
+def publish_confirmation(post, settings):
+    if post["status"] == "published":
+        return f"✅ Опубліковано\n\n📰 {post_title(post)}\n📢 {settings.channels.get(post['channel_id'], 'Канал')}"
+    return (
+        f"⚠️ {LABELS.get(post['status'], post['status'])}\n\n"
+        f"📰 {post_title(post)}\n"
+        "Перевірте стан через /scheduled перед повторною публікацією."
+    )
+
+
 def action(name, post, extra=None):
     value = f"{name}|{post['id']}|{post['revision']}"
     if extra is not None:
@@ -262,6 +288,8 @@ async def work_switch_rows(context):
         )
 
     context.user_data["work_posts"] = valid_ids
+    if len(valid_ids) < 2:
+        return []
 
     if active not in valid_ids:
         context.user_data["active_post"] = valid_ids[-1] if valid_ids else None
@@ -274,7 +302,8 @@ async def controls(target, post, context):
     config = pub.settings
     own = post["owner_id"] == config.admin_id
 
-    add_work_post(context, post["id"], make_active=True)
+    if post["status"] in EDITABLE:
+        add_work_post(context, post["id"], make_active=True)
     rows = await work_switch_rows(context)
 
     if post["status"] == "draft" and post["channel_id"] is None:
@@ -854,6 +883,7 @@ async def edit_active_post(message, context, post):
 
         # Якщо власного фото/відео немає, link preview
         # повинен відповідати саме новому тексту.
+        # Не чіпаємо готове превʼю або фото при заміні лише тексту.
         if not post.get("preview_url") and not post["photo_file_id"] and not post["video_file_id"]:
             changes["preview_url"] = new["preview_url"]
 
@@ -911,6 +941,12 @@ async def receive(update, context):
         return
 
     try:
+        # Новий пересланий пост не є відповіддю на старий запит часу.
+        if forwarded_message(message):
+            context.user_data.pop("await", None)
+            await create_new_post(message, context)
+            return
+
         # Очікування часу/дати має пріоритет над активним постом.
         if pending:
             post = await db_call(pub.store.get, pending["id"])
@@ -953,26 +989,16 @@ async def receive(update, context):
                 )
 
                 context.user_data.pop("await", None)
-                add_work_post(context, post["id"], make_active=True)
+                remove_work_post(context, post["id"])
 
                 tz = ZoneInfo(pub.settings.timezone)
                 dt = datetime.fromtimestamp(target, tz)
 
-                await message.reply_text(
-                    f"✅ ⏰ Пост заплановано на "
-                    f"{dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
-                )
-
-                await controls(message, post, context)
+                await message.reply_text(schedule_confirmation(post, pub.settings))
                 return
 
             context.user_data.pop("await", None)
             raise ContentError("Відкрийте пост заново через /scheduled.")
-
-        # Переслане повідомлення ЗАВЖДИ додається як новий пост.
-        if forwarded_message(message):
-            await create_new_post(message, context)
-            return
 
         # Звичайний текст/фото/відео редагує активний пост.
         post_id = active_post_id(context)
@@ -1112,8 +1138,6 @@ async def callbacks(update, context):
             context.user_data.pop("await", None)
 
             post = await db_call(pub.store.get, parts[1])
-            add_work_post(context, post["id"], make_active=True)
-
             await controls(query, post, context)
             return
 
@@ -1128,7 +1152,8 @@ async def callbacks(update, context):
                 "Це старе меню. Відкрийте актуальний пост через /scheduled."
             )
 
-        add_work_post(context, post["id"], make_active=True)
+        if post["status"] in EDITABLE:
+            add_work_post(context, post["id"], make_active=True)
 
         if name == "view":
             await pub.send_content(pub.settings.admin_id, post)
@@ -1157,8 +1182,12 @@ async def callbacks(update, context):
                 allow_uncertain=name == "yesag",
             )
 
-            add_work_post(context, post["id"], make_active=True)
-            await controls(query, post, context)
+            context.user_data.pop("await", None)
+            if post["status"] == "published":
+                remove_work_post(context, post["id"])
+                await present(query, publish_confirmation(post, pub.settings))
+            else:
+                await controls(query, post, context)
 
         elif name in {"plan", "day"}:
             if post["status"] not in EDITABLE:
@@ -1198,22 +1227,9 @@ async def callbacks(update, context):
                 int(time.time()),
             )
 
-            add_work_post(context, post["id"], make_active=True)
-
-            tz = ZoneInfo(pub.settings.timezone)
-            dt = datetime.fromtimestamp(target, tz)
-
-            text = (
-                f"✅ ⏰ Пост заплановано на "
-                f"{dt.strftime('%d.%m.%Y')} о {dt.strftime('%H:%M')}"
-            )
-
-            try:
-                await query.edit_message_text(text)
-            except TelegramError:
-                await query.message.reply_text(text)
-
-            await controls(query.message, post, context)
+            context.user_data.pop("await", None)
+            remove_work_post(context, post["id"])
+            await present(query, schedule_confirmation(post, pub.settings))
 
         elif name in {"clock", "date"}:
             if (
@@ -1298,7 +1314,7 @@ async def callbacks(update, context):
                     [
                         Button(
                             "← Назад",
-                            callback_data=action("plan", post, day_str),
+                            callback_data=action("day", post, day_str),
                         )
                     ]
                 )
@@ -1397,8 +1413,8 @@ async def callbacks(update, context):
                 revision,
             )
 
-            add_work_post(context, post["id"], make_active=True)
-            await controls(query, post, context)
+            remove_work_post(context, post["id"])
+            await present(query, publish_confirmation(post, pub.settings))
 
         elif name == "again":
             if post["status"] != "uncertain":
